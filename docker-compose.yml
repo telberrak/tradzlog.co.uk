@@ -1,0 +1,104 @@
+services:
+  app:
+    build: .
+    image: tradzlog-python:local
+    environment: &app_environment
+      APP_ENV: local
+      DATABASE_URL: postgresql+psycopg://tradzlog:tradzlog@postgres:5432/tradzlog
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: local-docker-change-me-before-production-please
+      JWT_ISSUER: tradzlog.local
+      ACCESS_TOKEN_EXPIRE_MINUTES: "43200"
+      ANTHROPIC_MODEL: claude-sonnet-4-20250514
+      LOG_LEVEL: INFO
+    profiles: ["build-only"]
+    command: ["python", "-c", "print('tradzlog image built')"]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tradzlog
+      POSTGRES_PASSWORD: tradzlog
+      POSTGRES_DB: tradzlog
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradzlog"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    image: tradzlog-python:local
+    build: .
+    environment: *app_environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["alembic", "upgrade", "head"]
+
+  api:
+    image: tradzlog-python:local
+    build: .
+    environment: *app_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "tradzlog_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/livez"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  web:
+    image: tradzlog-python:local
+    build: .
+    environment: *app_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      - "8001:8001"
+    volumes:
+      - uploads_data:/app/var/uploads
+    command: ["uvicorn", "tradzlog_web.main:app", "--host", "0.0.0.0", "--port", "8001"]
+
+  worker:
+    image: tradzlog-python:local
+    build: .
+    environment: *app_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    command: ["rq", "worker", "default", "analytics", "imports", "reports", "ai", "--url", "redis://redis:6379/0"]
+
+volumes:
+  postgres_data:
+  redis_data:
+  uploads_data:
