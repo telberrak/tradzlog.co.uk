@@ -2,6 +2,8 @@
 
 TradzLog is a Python-first professional trading journal and analytics platform.
 
+**Full documentation:** [DOCUMENTATION.md](DOCUMENTATION.md) — architecture, Docker, API routes, web UI, workers, testing, and deployment.
+
 ## Stack
 
 - API: FastAPI, Pydantic v2, SQLAlchemy 2, Alembic
