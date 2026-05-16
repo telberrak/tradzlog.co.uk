@@ -64,6 +64,17 @@ from tradzlog_db.models import (
     User,
 )
 from tradzlog_db.session import SessionLocal
+from tradzlog_web.ui import (
+    coach_quality_badge,
+    empty_state,
+    filter_tabs,
+    format_insight_content,
+    insight_cards_html,
+    kpi_card,
+    shell,
+    side_badge,
+    status_badge,
+)
 
 init_observability()
 logger = logging.getLogger("tradzlog.web")
@@ -138,156 +149,6 @@ async def web_security_headers(request: Request, call_next):
     )
     return response
 
-CSS = """
-:root{
-  color-scheme:dark;
-  --base:#050505;
-  --panel:#0b0b0b;
-  --panel2:#101010;
-  --line:#252525;
-  --line2:#363636;
-  --text:#d8d8d8;
-  --text-strong:#e8e8e8;
-  --muted:#9ca3af;
-  --green:#4ade80;
-  --red:#f87171;
-  --blue:#60a5fa;
-  --amber:#fbbf24;
-  --neutral:#93c5fd;
-  --surface:#070707;
-  --surface2:#0c0c0c;
-  --surface3:#080808;
-  --surface4:#090909;
-  --input-bg:#080808;
-  --border-subtle:#171717;
-  --border-table:#1c1c1c;
-  --th-text:#9ca3af;
-  --tr-hover:#111820;
-  --label-dim:#9b9b9b;
-  --label-accent:#93c5fd;
-  --nav-text:#d1d5db;
-  --nav-bg:#0c0c0c;
-  --nav-active-bg:#123a66;
-  --nav-active-border:#3b82f6;
-  --nav-active-text:#fff;
-  --control-bg:#0d0d0d;
-  --control-text:#e5e7eb;
-  --brand-fg:#f0c15a;
-  --brand-bg:#2b230d;
-  --brand-border:#5c4815;
-  --spark-grid:#1f2937;
-  --spark-axis:#4b5563;
-  --bar-track:#111827;
-  --bar-border:#374151;
-  --primary-bg:#0f315a;
-  --primary-border:#2563eb;
-  --primary-text:#fff;
-  --avatar-bg:#0c0c0c;
-  --top-bg:#070707;
-  --tabbar-bg:#070707;
-}
-[data-theme="light"]{
-  color-scheme:light;
-  --base:#f5f9ff;
-  --panel:#ffffff;
-  --panel2:#fafafa;
-  --line:#99ccff;
-  --line2:#88b8ee;
-  --text:#18181b;
-  --text-strong:#09090b;
-  --muted:#52525b;
-  --green:#047857;
-  --red:#b91c1c;
-  --blue:#1d4ed8;
-  --amber:#b45309;
-  --neutral:#1d4ed8;
-  --surface:#eaf4ff;
-  --surface2:#ffffff;
-  --surface3:#ffffff;
-  --surface4:#f5f9ff;
-  --input-bg:#ffffff;
-  --border-subtle:#cce6ff;
-  --border-table:#99ccff;
-  --th-text:#52525b;
-  --tr-hover:#eaf4ff;
-  --label-dim:#52525b;
-  --label-accent:#1d4ed8;
-  --nav-text:#3f3f46;
-  --nav-bg:#ffffff;
-  --nav-active-bg:#dbeafe;
-  --nav-active-border:#99ccff;
-  --nav-active-text:#1e3a8a;
-  --control-bg:#ffffff;
-  --control-text:#18181b;
-  --brand-fg:#1e40af;
-  --brand-bg:#eaf4ff;
-  --brand-border:#99ccff;
-  --spark-grid:#cce6ff;
-  --spark-axis:#88b8ee;
-  --bar-track:#eaf4ff;
-  --bar-border:#99ccff;
-  --primary-bg:#1d4ed8;
-  --primary-border:#1e40af;
-  --primary-text:#ffffff;
-  --avatar-bg:#eaf4ff;
-  --top-bg:#ffffff;
-  --tabbar-bg:#eaf4ff;
-}
-*{box-sizing:border-box}
-body{margin:0;background:var(--base);color:var(--text);font-family:"Consolas","Lucida Console","Geist Mono",ui-monospace,monospace;font-size:13.75px;letter-spacing:.01em}
-.shell{min-height:100vh;background:var(--base)}
-.tabbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--line);background:var(--tabbar-bg);padding:6px 8px}
-.brand{color:var(--brand-fg);background:var(--brand-bg);border:1px solid var(--brand-border);padding:5px 10px;font-weight:800;margin-right:10px;flex-shrink:0}
-.nav{display:flex;gap:5px;flex-wrap:wrap;flex:1;align-items:center;min-width:0}
-.nav a{color:var(--nav-text);text-decoration:none;border:1px solid var(--line2);background:var(--nav-bg);padding:5px 11px;line-height:1;text-transform:none}
-.nav a.active,.nav a:hover{background:var(--nav-active-bg);border-color:var(--nav-active-border);color:var(--nav-active-text)}
-.theme-toggle{margin-left:auto;flex-shrink:0;border:1px solid var(--line2);background:var(--control-bg);color:var(--control-text);padding:5px 10px;font-size:12.5px;font-family:inherit;text-transform:uppercase;cursor:pointer;border-radius:0}
-.theme-toggle:hover{border-color:var(--nav-active-border);color:var(--text-strong)}
-.main{padding:8px;max-width:none;width:100%}
-.top{display:flex;justify-content:space-between;align-items:center;border:1px solid var(--line);background:var(--top-bg);margin-bottom:8px;padding:7px 8px}
-.crumb{color:var(--muted);text-transform:uppercase;font-size:11.25px}
-.top h1{font-size:16.25px;line-height:1;margin:2px 0 0!important;text-transform:uppercase;color:var(--text-strong)}
-h2{color:var(--text-strong);font-size:16.25px;margin:4px 0 0;font-weight:700}
-.actions{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
-.pill,.select,button:not(.theme-toggle){border:1px solid var(--line2);background:var(--control-bg);color:var(--control-text);border-radius:0;padding:5px 9px;font-size:12.5px;text-decoration:none;font-family:inherit;text-transform:uppercase}
-.primary{background:var(--primary-bg);border-color:var(--primary-border);color:var(--primary-text);font-weight:700}
-.avatar{border:1px solid var(--line2);background:var(--avatar-bg);color:var(--brand-fg);padding:5px 8px;font-weight:800}
-.label{color:var(--label-accent);font-size:11.25px;text-transform:uppercase;letter-spacing:.08em}
-.grid{display:grid;gap:8px}
-.kpis{grid-template-columns:repeat(6,minmax(0,1fr));margin-top:8px}
-.two-col{grid-template-columns:minmax(0,1.5fr) minmax(360px,.9fr);margin-top:8px}
-.form-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
-.field{display:grid;gap:4px}
-.field label{color:var(--label-dim);font-size:11.25px;text-transform:uppercase}
-input,select,textarea{width:100%;border:1px solid var(--line2);background:var(--input-bg);color:var(--text);border-radius:0;padding:6px 7px;font:inherit;min-height:27px}
-textarea{min-height:76px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:0;padding:8px}
-.kpi{font-size:23.75px;margin-top:5px;font-weight:700}
-.positive{color:var(--green)}
-.negative{color:var(--red)}
-.neutral{color:var(--neutral)}
-.amber{color:var(--amber)}
-.muted{color:var(--muted)}
-.small{font-size:12.5px}
-.section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px;border-bottom:1px solid var(--border-subtle);padding-bottom:5px}
-table{width:100%;border-collapse:collapse;font-size:12.5px}
-td,th{padding:5px 7px;border-bottom:1px solid var(--border-table);text-align:left;white-space:nowrap}
-th{color:var(--th-text);font-size:11.25px;text-transform:uppercase;background:var(--surface4);position:sticky;top:0;z-index:1}
-tr:nth-child(even){background:var(--surface4)}
-tr:hover{background:var(--tr-hover)}
-.badge{border:1px solid var(--line2);background:var(--surface3);border-radius:0;padding:2px 6px;font-size:11.25px;text-transform:uppercase}
-.spark{width:100%;height:170px;background-image:linear-gradient(var(--spark-grid) 1px,transparent 1px),linear-gradient(90deg,var(--spark-grid) 1px,transparent 1px);background-size:18px 18px}
-.spark polyline{fill:none;stroke:var(--green);stroke-width:2}
-.spark .axis{stroke:var(--spark-axis);stroke-width:1}
-.bar{height:6px;background:var(--bar-track);overflow:hidden;border:1px solid var(--bar-border)}
-.bar span{display:block;height:100%;background:var(--green)}
-.empty{border:1px dashed var(--line2);padding:14px;color:var(--muted);background:var(--surface3)}
-.accounts{grid-template-columns:repeat(auto-fit,minmax(280px,1fr));margin-top:8px}
-@media(max-width:1000px){.kpis{grid-template-columns:repeat(2,1fr)}.two-col,.form-grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}
-@media(max-width:768px){.nav{overflow:auto;flex-wrap:nowrap}.main{padding:6px}.kpis{grid-template-columns:1fr}.actions{flex-wrap:wrap}}
-"""
-
-
 def money(value: Decimal | int | float | None) -> str:
     amount = Decimal(value or 0)
     sign = "-" if amount < 0 else ""
@@ -319,96 +180,13 @@ def demo_user() -> tuple[User | None, str | None]:
         session.close()
 
 
-def nav(active: str) -> str:
-    items = [
-        ("Main", "/dashboard", "dashboard"),
-        ("Portfolio", "/dashboard/portfolio", "portfolio"),
-        ("Trades", "/trades", "trades"),
-        ("Positions", "/positions", "positions"),
-        ("Journal", "/journal", "journal"),
-        ("Analytics", "/analytics", "analytics"),
-        ("Coaching", "/coaching", "coaching"),
-        ("Settings", "/settings", "settings"),
-    ]
-    return "".join(
-        f'<a class="{"active" if active_key == active else ""}" href="{href}">{key}</a>'
-        for key, href, active_key in items
-    )
-
-
-def shell(title: str, active: str, body: str, account_name: str = "Demo Account", user_name: str = "Trader") -> str:
-    initials = escape("".join(part[:1] for part in user_name.split()[:2]).upper() or "T")
-    return f"""<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>{escape(title)} · TradzLog</title>
-    <style>{CSS}</style>
-    <script>
-(function () {{
-  try {{
-    var k = "tradzlog-theme";
-    var saved = localStorage.getItem(k);
-    var prefersLight = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches;
-    var initial = saved || (prefersLight ? "light" : "dark");
-    document.documentElement.setAttribute("data-theme", initial);
-  }} catch (e) {{}}
-}})();
-    </script>
-  </head>
-  <body>
-    <div class="shell">
-      <div class="tabbar">
-        <div class="brand">TRADZLOG</div>
-        <nav class="nav">{nav(active)}</nav>
-        <button type="button" class="theme-toggle" id="theme-toggle" aria-label="Switch color theme">Theme</button>
-      </div>
-      <main class="main">
-        <header class="top">
-          <div>
-            <div class="crumb">TradzLog / {escape(title)}</div>
-            <h1 style="margin:6px 0 0">{escape(title)}</h1>
-          </div>
-          <div class="actions">
-            <a class="pill" href="/dashboard?range=1M">1M</a>
-            <a class="pill" href="/dashboard?range=3M">3M</a>
-            <a class="pill" href="/dashboard?range=YTD">YTD</a>
-            <a class="pill" href="/dashboard/portfolio">All Accounts</a>
-            <div class="avatar" aria-label="User avatar">{initials}</div>
-          </div>
-        </header>
-        {body}
-      </main>
-    </div>
-    <script>
-(function () {{
-  var k = "tradzlog-theme";
-  function label(t) {{ return t === "light" ? "Dark" : "Light"; }}
-  function apply(t) {{
-    document.documentElement.setAttribute("data-theme", t);
-    try {{ localStorage.setItem(k, t); }} catch (e) {{}}
-    var btn = document.getElementById("theme-toggle");
-    if (btn) btn.textContent = label(t);
-  }}
-  var cur = document.documentElement.getAttribute("data-theme") || "dark";
-  var btn = document.getElementById("theme-toggle");
-  if (btn) {{
-    btn.textContent = label(cur);
-    btn.addEventListener("click", function () {{
-      var next = (document.documentElement.getAttribute("data-theme") || "dark") === "light" ? "dark" : "light";
-      apply(next);
-    }});
-  }}
-}})();
-    </script>
-  </body>
-</html>"""
-
-
 def sparkline(points: list[Decimal]) -> str:
     if len(points) < 2:
-        return '<div class="empty">Equity curve will appear after daily snapshots are generated.</div>'
+        return empty_state(
+            "No equity data yet",
+            "Equity curve will appear after daily snapshots are generated.",
+            icon="📈",
+        )
     width = Decimal("900")
     height = Decimal("190")
     min_value = min(points)
@@ -466,33 +244,34 @@ def dashboard_data(account_id: str | None) -> dict[str, object]:
         session.close()
 
 
-def kpi_card(label: str, value: str, value_tone: str = "neutral", note: str = "") -> str:
-    return f'<div class="card"><div class="label">{escape(label)}</div><div class="kpi {value_tone}">{escape(value)}</div><div class="muted small">{escape(note)}</div></div>'
 
 
 def render_dashboard(account_id: str | None = None) -> str:
     data = dashboard_data(account_id)
     if "error" in data:
-        body = f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>'
-        return shell("Dashboard", "dashboard", body)
+        body = empty_state("Dashboard unavailable", str(data["error"]))
+        return shell("Dashboard", "dashboard", body, show_range=False)
     user = data["user"]
     account = data["account"]
     metrics = data["summary"]
-    account_links = "".join(
-        f'<a class="pill" href="/dashboard?account_id={escape(account_row.id)}">{escape(account_row.name)}</a>'
-        for account_row in data["accounts"]
+    account_tabs = filter_tabs(
+        [("All accounts", "/dashboard", account is None)]
+        + [
+            (account_row.name, f"/dashboard?account_id={escape(account_row.id)}", account and account.id == account_row.id)
+            for account_row in data["accounts"]
+        ]
     )
     setup_rows = "".join(
-        f"""<tr><td>{escape(str(row["key"]))}</td><td>{row["trades"]}</td><td class="{tone(row["netPnl"])}">{money(row["netPnl"])}</td><td>{number(row["winRate"], "%")}</td><td>{number(row["averageR"], "R")}</td></tr>"""
+        f"""<tr><td>{escape(str(row["key"]))}</td><td class="num">{row["trades"]}</td><td class="num {tone(row["netPnl"])}">{money(row["netPnl"])}</td><td class="num">{number(row["winRate"], "%")}</td><td class="num">{number(row["averageR"], "R")}</td></tr>"""
         for row in data["setups"]
     ) or '<tr><td colspan="5" class="muted">No setup data yet.</td></tr>'
     recent_rows = "".join(
-        f"""<tr><td>{escape(trade.opened_at.strftime("%Y-%m-%d"))}</td><td>{escape(trade.instrument.symbol)}</td><td><span class="badge">{escape(trade.direction.value)}</span></td><td>{escape(trade.setup_tag or "Unassigned")}</td><td class="{tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td><td>{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td></tr>"""
+        f"""<tr><td>{escape(trade.opened_at.strftime("%Y-%m-%d"))}</td><td>{escape(trade.instrument.symbol)}</td><td>{side_badge(trade.direction.value)}</td><td>{escape(trade.setup_tag or "Unassigned")}</td><td class="num {tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td><td class="num">{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td></tr>"""
         for trade in data["recent_trades"]
     ) or '<tr><td colspan="6" class="muted">No trades logged yet.</td></tr>'
     body = f"""
-      <div class="actions" style="margin-top:16px">{account_links}</div>
-      <section class="grid kpis">
+      <div class="toolbar page-block">{account_tabs}</div>
+      <section class="grid kpis page-block">
         {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "Selected account")}
         {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
         {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "Gross winners / losers")}
@@ -608,19 +387,19 @@ def first_user(session) -> User | None:
 
 
 def trade_filters(status_filter: str | None, account_id: str | None) -> str:
-    status_links = [
-        ("All", "/trades"),
-        ("Open", "/trades?status_filter=OPEN"),
-        ("Closed", "/trades?status_filter=CLOSED"),
-        ("Cancelled", "/trades?status_filter=CANCELLED"),
-    ]
-    links = "".join(
-        f'<a class="pill {"primary" if label.upper() == (status_filter or "ALL") else ""}" href="{href}">{label}</a>'
-        for label, href in status_links
+    current = (status_filter or "ALL").upper()
+    tabs = filter_tabs(
+        [
+            ("All", "/trades", current == "ALL"),
+            ("Open", "/trades?status_filter=OPEN", current == "OPEN"),
+            ("Closed", "/trades?status_filter=CLOSED", current == "CLOSED"),
+            ("Cancelled", "/trades?status_filter=CANCELLED", current == "CANCELLED"),
+        ]
     )
+    extra = '<a class="btn btn-primary" href="/trades/new">Log Trade</a>'
     if account_id:
-        links += f'<a class="pill" href="/trades?account_id={escape(account_id)}">Account filtered</a>'
-    return f'<div class="actions" style="margin-top:16px">{links}<a class="pill primary" href="/trades/new">Log Trade</a></div>'
+        extra += ' <span class="badge">Account filter active</span>'
+    return f'<div class="toolbar page-block">{tabs}{extra}</div>'
 
 
 def load_trade_page_data(status_filter: str | None, account_id: str | None) -> dict[str, object]:
@@ -656,14 +435,14 @@ def trades(status_filter: str | None = Query(default=None), account_id: str | No
         f"""<tr>
           <td>{escape(trade.opened_at.strftime("%Y-%m-%d %H:%M"))}</td>
           <td><a class="pill" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)}</a></td>
-          <td><span class="badge">{escape(trade.direction.value)}</span></td>
+          <td>{side_badge(trade.direction.value)}</td>
           <td>{escape(trade.account.name)}</td>
           <td>{escape(trade.setup_tag or "Unassigned")}</td>
           <td>{money(trade.metrics.average_entry if trade.metrics else trade.planned_entry)}</td>
           <td>{money(trade.metrics.average_exit if trade.metrics else None)}</td>
           <td class="{tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td>
           <td>{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td>
-          <td><span class="badge">{escape(trade.status.value)}</span></td>
+          <td>{status_badge(trade.status.value)}</td>
         </tr>"""
         for trade in data["trades"]
     ) or '<tr><td colspan="10" class="muted">No trades match these filters.</td></tr>'
@@ -894,7 +673,7 @@ def positions() -> str:
               <tr>
                 <td><a class="pill" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)}</a></td>
                 <td>{escape(trade.account.name)}</td>
-                <td><span class="badge">{escape(trade.direction.value)}</span></td>
+                <td>{side_badge(trade.direction.value)}</td>
                 <td>{money(entry)}</td>
                 <td>{number(quantity)}</td>
                 <td>{money(risk)}</td>
@@ -1185,10 +964,7 @@ def analytics_nav(active: str) -> str:
         ("Risk", "/analytics/risk", "risk"),
         ("Streaks", "/analytics/streaks", "streaks"),
     ]
-    return '<div class="actions" style="margin-top:16px">' + "".join(
-        f'<a class="pill {"primary" if key == active else ""}" href="{href}">{label}</a>'
-        for label, href, key in items
-    ) + "</div>"
+    return f'<div class="page-block">{filter_tabs([(label, href, key == active) for label, href, key in items])}</div>'
 
 
 def performance_table(rows: list[dict[str, object]], label: str) -> str:
@@ -1787,10 +1563,7 @@ def coaching_nav(active: str) -> str:
         ("Ask the Coach", "/coaching/chat", "chat"),
         ("Journal Prompts", "/coaching/prompts", "prompts"),
     ]
-    return '<div class="actions" style="margin-top:16px">' + "".join(
-        f'<a class="pill {"primary" if key == active else ""}" href="{href}">{label}</a>'
-        for label, href, key in items
-    ) + "</div>"
+    return f'<div class="page-block">{filter_tabs([(label, href, key == active) for label, href, key in items])}</div>'
 
 
 def latest_insights(session, user_id: str) -> list[AIInsight]:
@@ -1802,13 +1575,7 @@ def latest_insights(session, user_id: str) -> list[AIInsight]:
 
 
 def insight_cards(insights: list[AIInsight]) -> str:
-    return "".join(
-        f"""<article class="card">
-          <div class="section-head"><div><div class="label">{escape(insight.type.value)}</div><h2 style="margin:4px 0 0">{escape(insight.title)}</h2></div><span class="badge">{escape(insight.generated_at.strftime("%Y-%m-%d"))}</span></div>
-          <p style="white-space:pre-wrap;line-height:1.55">{escape(insight.content)}</p>
-        </article>"""
-        for insight in insights
-    ) or '<section class="empty">No AI insights yet. Generate a pattern analysis to start.</section>'
+    return insight_cards_html(insights)
 
 
 @app.get("/coaching", response_class=HTMLResponse)
@@ -1822,7 +1589,7 @@ def coaching_dashboard() -> str:
         setups = grouped_performance(session, user.id, "setup")
         insights = latest_insights(session, user.id)
         setup_rows = "".join(
-            f"""<tr><td>{escape(str(row["key"]))}</td><td>{row["trades"]}</td><td class="{tone(row["netPnl"])}">{money(row["netPnl"])}</td><td>{number(row["winRate"], "%")}</td><td>{number(row["averageR"], "R")}</td><td>{'High expectancy' if Decimal(row["averageR"]) > 0 else 'Needs review'}</td></tr>"""
+            f"""<tr><td>{escape(str(row["key"]))}</td><td class="num">{row["trades"]}</td><td class="num {tone(row["netPnl"])}">{money(row["netPnl"])}</td><td class="num">{number(row["winRate"], "%")}</td><td class="num">{number(row["averageR"], "R")}</td><td>{coach_quality_badge(row["averageR"], row["trades"])}</td></tr>"""
             for row in setups[:10]
         ) or '<tr><td colspan="6" class="muted">No setup scorecard data yet.</td></tr>'
         body = f"""
@@ -1836,7 +1603,7 @@ def coaching_dashboard() -> str:
           <section class="grid two-col">
             <section class="card" style="margin-top:16px">
               <div class="section-head"><div><div class="label">Pattern Analysis</div><h2 style="margin:4px 0 0">AI Insights</h2></div><form method="post" action="/coaching/generate"><button class="primary" type="submit">Generate</button></form></div>
-              <div class="grid">{insight_cards(insights)}</div>
+              <div class="grid">{insight_cards_html(insights)}</div>
             </section>
             <section class="card" style="margin-top:16px">
               <div class="section-head"><div><div class="label">Setup Scorecard</div><h2 style="margin:4px 0 0">Edge Quality</h2></div></div>
