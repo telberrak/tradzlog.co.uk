@@ -1,0 +1,10 @@
+# Files that run on Linux (the EC2 server, containers, CI) must keep LF line endings even when
+# checked out on Windows, or bash fails on the carriage returns.
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.template text eol=lf
+*.json text eol=lf
+Dockerfile text eol=lf
+.env.example text eol=lf
