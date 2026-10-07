@@ -94,3 +94,15 @@ def test_redis_rate_limiter_falls_back_to_memory_when_redis_fails() -> None:
     blocked = limiter.check("login:127.0.0.1", limit=1, window_seconds=60)
 
     assert not blocked.allowed
+
+
+def test_settings_reject_default_jwt_secret_outside_local() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from tradzlog_api.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(app_env="production", jwt_secret="dev-only-change-me")
+    assert Settings(app_env="production", jwt_secret="x" * 40).app_env == "production"
+    assert Settings(app_env="local", jwt_secret="dev-only-change-me").app_env == "local"

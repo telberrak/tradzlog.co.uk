@@ -1,5 +1,11 @@
 from tradzlog_api.services import enqueue
-from tradzlog_api.services.jobs import EnqueuedJob, QUEUE_AI, QUEUE_ANALYTICS, QUEUE_IMPORTS, QUEUE_REPORTS
+from tradzlog_api.services.jobs import (
+    QUEUE_AI,
+    QUEUE_ANALYTICS,
+    QUEUE_IMPORTS,
+    QUEUE_REPORTS,
+    EnqueuedJob,
+)
 
 
 def test_enqueue_helpers_use_expected_queues(monkeypatch) -> None:

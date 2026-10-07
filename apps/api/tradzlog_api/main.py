@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session, selectinload
 
+from tradzlog_api.config import settings
 from tradzlog_api.deps import current_user, db_session
 from tradzlog_api.security import (
     create_access_token,
@@ -93,7 +94,7 @@ logger = logging.getLogger("tradzlog.api")
 app = FastAPI(title="TradzLog API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:8000"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -197,7 +198,6 @@ def livez() -> dict[str, str]:
     return {"status": "ok"}
 
 
-
 def create_auth_token(
     session: Session,
     user: User,
@@ -214,6 +214,14 @@ def create_auth_token(
         )
     )
     return raw_token
+
+
+def dev_token_response(token: str) -> dict[str, object]:
+    # One-time tokens must only ever reach the user by email; echo them back only in local dev.
+    response: dict[str, object] = {"ok": True, "delivery": "email"}
+    if settings.app_env == "local":
+        response["devToken"] = token
+    return response
 
 
 def consume_auth_token(session: Session, raw_token: str, purpose: AuthTokenPurpose) -> AuthToken:
@@ -273,7 +281,7 @@ def request_magic_link(payload: MagicLinkRequest, session: Session = Depends(db_
     if user is not None:
         token = create_auth_token(session, user, AuthTokenPurpose.MAGIC_LINK, timedelta(minutes=15))
         session.commit()
-        return {"ok": True, "delivery": "email", "devToken": token}
+        return dev_token_response(token)
     return {"ok": True, "delivery": "email"}
 
 
@@ -298,7 +306,7 @@ def forgot_password(payload: ForgotPasswordRequest, session: Session = Depends(d
     if user is not None:
         token = create_auth_token(session, user, AuthTokenPurpose.PASSWORD_RESET, timedelta(hours=1))
         session.commit()
-        return {"ok": True, "delivery": "email", "devToken": token}
+        return dev_token_response(token)
     return {"ok": True, "delivery": "email"}
 
 
@@ -457,8 +465,8 @@ def recompute_trade_side_effects(session: Session, trade: Trade) -> None:
 def list_trades(
     account_id: str | None = None,
     status_filter: TradeStatus | None = Query(default=None, alias="status"),
-    page: int = 1,
-    limit: int = 50,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
     user: User = Depends(current_user),
     session: Session = Depends(db_session),
 ) -> list[Trade]:
@@ -530,6 +538,8 @@ def update_trade(
     data = payload.model_dump(exclude_unset=True)
     if "direction" in data:
         data["direction"] = Direction(data["direction"].value)
+    if data.get("instrument_id") is not None and session.get(Instrument, data["instrument_id"]) is None:
+        raise HTTPException(status_code=400, detail="Invalid instrument")
     for key, value in data.items():
         setattr(trade, key, value)
     trade.planned_rr = compute_planned_rr(trade.direction, trade.planned_entry, trade.planned_stop, trade.planned_target)

@@ -169,3 +169,17 @@ def test_password_reset_token_updates_password_and_is_single_use() -> None:
             session,  # type: ignore[arg-type]
         )
     assert exc.value.status_code == 400
+
+
+def test_one_time_tokens_are_not_echoed_outside_local(monkeypatch) -> None:
+    monkeypatch.setattr(api_main.settings, "app_env", "production")
+    user = User(id="user-1", email="trader@example.com", hashed_password="hashed")
+    session = FakeAuthSession([user, user])
+    session.users[user.id] = user
+
+    reset = forgot_password(ForgotPasswordRequest(email="trader@example.com"), session)  # type: ignore[arg-type]
+    magic = request_magic_link(MagicLinkRequest(email="trader@example.com"), session)  # type: ignore[arg-type]
+
+    assert "devToken" not in reset
+    assert "devToken" not in magic
+    assert len(auth_tokens(session)) == 2

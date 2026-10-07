@@ -220,3 +220,9 @@ def test_create_mentor_comment_requires_owned_access_and_trade(monkeypatch) -> N
             body="Blocked",
         )
     assert exc.value.status_code == 404
+
+
+def test_safe_upload_name_uses_mime_extension_not_client_filename() -> None:
+    assert web_main.safe_upload_name("image/png").endswith(".png")
+    assert web_main.safe_upload_name("image/jpeg").endswith(".jpg")
+    assert web_main.safe_upload_name("image/webp").endswith(".webp")

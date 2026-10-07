@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select
-
 from tradzlog_api.services.ai import build_coaching_payload, generate_coaching_insight
-from tradzlog_api.services.analytics import grouped_performance, rebuild_daily_stats, rebuild_equity_curve, summary
+from tradzlog_api.services.analytics import (
+    grouped_performance,
+    rebuild_daily_stats,
+    rebuild_equity_curve,
+    summary,
+)
 from tradzlog_api.services.imports import parse_broker_csv
 from tradzlog_api.services.reports import performance_report_payload, tax_report_csv
 from tradzlog_db.models import Account, BrokerSync, BrokerSyncStatus, BrokerSyncType, User

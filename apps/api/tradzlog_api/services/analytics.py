@@ -8,7 +8,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from tradzlog_api.services.cache import analytics_cache, decimalize
-from tradzlog_db.models import Account, AccountSnapshot, DailyStats, Instrument, Trade, TradeMetrics, TradeStatus
+from tradzlog_db.models import (
+    Account,
+    AccountSnapshot,
+    DailyStats,
+    Instrument,
+    Trade,
+    TradeMetrics,
+    TradeStatus,
+)
 
 ZERO = Decimal("0")
 ANALYTICS_TTL_SECONDS = 300

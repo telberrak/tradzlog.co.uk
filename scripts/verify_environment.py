@@ -59,8 +59,8 @@ def check_jwt_secret() -> CheckResult:
 def check_imports() -> CheckResult:
     try:
         import tradzlog_api.main  # noqa: F401
-        import tradzlog_web.main  # noqa: F401
         import tradzlog_db.models  # noqa: F401
+        import tradzlog_web.main  # noqa: F401
     except Exception as exc:
         return CheckResult("imports", CheckStatus.FAIL, f"Application imports failed: {exc}")
     return CheckResult("imports", CheckStatus.PASS, "Application modules import successfully")

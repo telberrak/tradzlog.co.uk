@@ -68,7 +68,6 @@ from tradzlog_web.ui import (
     coach_quality_badge,
     empty_state,
     filter_tabs,
-    format_insight_content,
     insight_cards_html,
     kpi_card,
     shell,
@@ -100,7 +99,8 @@ WEB_SENSITIVE_POSTS = {
 
 WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/")
 
-ALLOWED_UPLOAD_TYPES = {"image/png", "image/jpeg", "image/webp"}
+UPLOAD_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+ALLOWED_UPLOAD_TYPES = set(UPLOAD_EXTENSIONS)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
@@ -1276,9 +1276,10 @@ def paste_preview(account_id: str = Form(...), rows: str = Form("")) -> Redirect
     return RedirectResponse("/settings/import", status_code=status.HTTP_303_SEE_OTHER)
 
 
-def safe_upload_name(original_name: str | None) -> str:
-    suffix = Path(original_name or "upload.bin").suffix.lower()
-    return f"{uuid4().hex}{suffix}"
+def safe_upload_name(content_type: str | None) -> str:
+    # Derive the extension from the validated MIME type, never the client filename,
+    # so StaticFiles can't be tricked into serving e.g. an uploaded .html page.
+    return f"{uuid4().hex}{UPLOAD_EXTENSIONS[content_type or '']}"
 
 
 def validate_upload(file: UploadFile) -> None:
@@ -1331,7 +1332,7 @@ def uploads_page() -> str:
               <div class="section-head"><div><div class="label">Screenshots</div><h2 style="margin:4px 0 0">Upload Chart Image</h2></div><button class="primary" type="submit">Upload</button></div>
               <div class="field"><label>Trade</label><select name="trade_id">{trade_options}</select></div>
               <div class="field" style="margin-top:12px"><label>Journal</label><select name="journal_entry_id">{journal_options}</select></div>
-              <div class="field" style="margin-top:12px"><label>Image</label><input type="file" name="file" accept="image/png,image/jpeg,image/webp,image/gif" required /></div>
+              <div class="field" style="margin-top:12px"><label>Image</label><input type="file" name="file" accept="image/png,image/jpeg,image/webp" required /></div>
               <p class="muted small">Files are stored locally for development and recorded in the attachment table. Cloudflare R2 can replace this storage layer later.</p>
             </form>
             <section class="card" style="margin-top:16px">
@@ -1372,7 +1373,7 @@ async def upload_attachment(
             journal = session.scalar(select(JournalEntry).where(JournalEntry.id == linked_journal_id, JournalEntry.user_id == user.id))
             if journal is None:
                 raise HTTPException(status_code=404, detail="Journal not found")
-        stored_name = safe_upload_name(file.filename)
+        stored_name = safe_upload_name(file.content_type)
         target = UPLOAD_ROOT / stored_name
         with target.open("wb") as handle:
             shutil.copyfileobj(file.file, handle)

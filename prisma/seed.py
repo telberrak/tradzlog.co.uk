@@ -118,6 +118,9 @@ def main() -> None:
                 if instrument.asset_class == AssetClass.FUTURES:
                     base_price = Decimal(str(round(random.uniform(3900, 5400), 2)))
                 stop_distance = Decimal(str(round(random.uniform(0.5, 4.0), 2)))
+                if instrument.asset_class == AssetClass.FOREX:
+                    base_price = Decimal(str(round(random.uniform(1.05, 1.15), 5)))
+                    stop_distance = Decimal(str(round(random.uniform(0.001, 0.004), 5)))
                 target_distance = stop_distance * Decimal(str(round(random.uniform(1.2, 3.0), 2)))
                 planned_stop = base_price - stop_distance if direction == Direction.LONG else base_price + stop_distance
                 planned_target = base_price + target_distance if direction == Direction.LONG else base_price - target_distance
@@ -125,7 +128,7 @@ def main() -> None:
                 exit_price = planned_target if won else planned_stop
                 opened_at = trade_day.replace(hour=random.randint(9, 15), minute=random.randint(0, 59), second=0, microsecond=0)
                 closed_at = opened_at + timedelta(minutes=random.randint(15, 240))
-                quantity = Decimal(random.choice([1, 2, 3])) if instrument.asset_class == AssetClass.FUTURES else Decimal(random.choice([25, 50, 100]))
+                quantity = Decimal(random.choice([1, 2, 3])) if instrument.asset_class in {AssetClass.FUTURES, AssetClass.FOREX} else Decimal(random.choice([25, 50, 100]))
                 trade = Trade(
                     account_id=account.id,
                     user_id=user.id,
