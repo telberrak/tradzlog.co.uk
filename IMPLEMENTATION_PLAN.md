@@ -1,268 +1,233 @@
 # TradzLog Implementation Plan
 
-This plan tracks the build order for implementing the full TradzLog product in the Python-first stack.
-
-## Feature Order
-
-1. Auth and onboarding foundations
-2. Interactive web UI shell and dashboard
-3. Trade entry, trade history, and positions UX
-4. Journaling system
-5. Analytics visualizations
-6. Broker imports and uploads
-7. Reports and exports
-8. AI coaching
-9. Billing and subscriptions
-10. Community and mentor features
-11. Production hardening
-
-## Step 1: Auth and Onboarding Foundations
-
-Status: Complete
-
-Completed:
-
-- Added `AuthToken` model for email verification, password reset, and magic links.
-- Added `email_verified_at` to `User`.
-- Added secure one-time token generation and SHA-256 token hashing.
-- Implemented `POST /api/auth/verify-email`.
-- Implemented `POST /api/auth/magic-link`.
-- Implemented `POST /api/auth/magic-link/consume`.
-- Implemented functional `POST /api/auth/forgot-password`.
-- Implemented functional `POST /api/auth/reset-password`.
-- Validated with `python -m compileall apps packages prisma tests`.
-
-Remaining:
-
-- Add email delivery through Resend for verification, reset, and magic-link emails.
-- Add Google OAuth flow.
-- Add onboarding models/routes for account setup, instruments, setup tags, rules, and initial import/manual trade.
-- Add rate limiting for auth endpoints.
-- Add tests for token expiry, single-use behavior, and password reset.
-
-## Step 2: Interactive Web UI Shell and Dashboard
-
-Status: In progress
-
-Build the authenticated app shell with the dark trading-terminal visual identity:
-
-Completed:
-
-- Replaced the static web shell with a reusable server-rendered Python ASGI app shell.
-- Added dark trading-terminal visual design with sidebar navigation, top bar, account controls, dense cards, and responsive layout.
-- Added database-backed `/dashboard` with KPI cards for net P&L, win rate, profit factor, total trades, average R, and average hold time.
-- Added setup scoreboard, recent trades table, account switching links, and equity sparkline.
-- Added `/dashboard/portfolio` with all-account KPIs and per-account summary cards.
-
-Remaining:
-
-- Add authenticated session handling for the web app instead of demo-user fallback.
-- Add real date range filtering in dashboard queries.
-- Add notifications bell data and account selector dropdown behavior.
-- Add client-side widget dragging/resizing for the dashboard grid.
-
-## Step 3: Trade Entry, Trade History, and Positions UX
-
-Status: In progress
-
-Completed:
-
-- Added `/trades` server-rendered trade history with status filters, account filtering hooks, dense trade rows, P&L coloring, status badges, and links to detail pages.
-- Added `/trades/new` manual trade entry form with account, instrument, direction, status, setup tag, timeframe, timestamps, planned stop/target, entry/exit prices, fees, quantity, and notes.
-- Added `POST /trades/new` to create real trades with entry/exit executions, planned R calculation, trade metrics, daily stats rebuilds, and equity curve rebuilds.
-- Added `/trades/{trade_id}` detail page with KPI cards, trade plan, notes, and execution breakdown.
-- Added `/positions` open positions risk board with account grouping data, risk calculation, and inline quick-close forms.
-- Added `POST /positions/{trade_id}/close` to close open positions, append exit executions, recompute metrics, and rebuild analytics.
-
-Remaining:
-
-- Add repeatable multi-execution rows in the UI instead of a single entry plus optional full exit.
-- Add asset-class-specific fields for options, futures, forex, stocks, crypto, and commodities.
-- Add live browser-side risk/reward and position sizing calculator.
-- Add richer filters for asset class, setup tag, direction, outcome, tags, and P&L range.
-- Add expandable trade rows, inline quick edit, reviewed flag toggles, CSV/PDF export buttons, and virtualized table behavior.
-
-## Step 4: Journaling System
-
-Status: In progress
-
-Completed:
-
-- Added `/journal` chronological feed with type filters, mood badges, market condition badges, and content previews.
-- Added `/journal/new` structured journal form for daily, weekly, freeform, and trade review entries.
-- Added `POST /journal/new` to save Tiptap-compatible JSON content, mood, market condition, linked trade, and up to five key lessons.
-- Added `/journal/{journal_id}` detail page with reflection content, context, key lessons, and linked trade navigation.
-- Added `/trades/{trade_id}/journal` shortcut to create a prefilled per-trade review.
-- Added trade detail page link to open the trade journal flow.
-
-Remaining:
-
-- Add a richer browser editor with formatting controls, image embeds, and section templates.
-- Add journal search by keyword and tag filtering.
-- Add editable journal entries and delete/archive actions in the web UI.
-- Add chart attachment upload and annotation persistence.
-- Add automatic daily stats block and linked-trades block inside daily reviews.
-
-## Step 5: Analytics Visualizations
-
-Status: In progress
-
-Completed:
-
-- Added `/analytics` and `/analytics/overview` with portfolio KPI cards, combined equity curve, daily P&L bars, and setup performance table.
-- Added `/analytics/instruments` for instrument-level trades, net P&L, win rate, profit factor, and average R.
-- Added `/analytics/setups` for setup tag performance.
-- Added `/analytics/time` with day-of-week and hour-of-day heat-map style cards.
-- Added `/analytics/risk` with max drawdown, best/worst day, drawdown curve, and daily P&L distribution.
-- Added `/analytics/streaks` with longest win streak, longest loss streak, current streak, and setup stability table.
-
-Remaining:
-
-- Add real charting components for line, bar, histogram, scatter, and calendar heat-map visuals.
-- Add date range filtering and account filtering across all analytics pages.
-- Add win/loss R-multiple distribution and rolling 10-trade moving average.
-- Add comparison tab for periods, setup tags, and accounts.
-- Add Redis caching for expensive analytics queries.
-
-## Step 6: Broker Imports and Uploads
-
-Status: In progress
-
-Completed:
-
-- Added `/settings/import` CSV import page with account selector, broker format selector, CSV upload, spreadsheet-paste area, and import history.
-- Added `POST /settings/import/preview` to parse CSV rows, normalize broker column aliases, show preview rows, log `BrokerSync` history, and flag duplicate broker order IDs.
-- Added import history table backed by `BrokerSync`.
-- Added `/settings/uploads` screenshot upload page with trade/journal linking.
-- Added `POST /settings/uploads` to store uploaded chart images locally for development and persist `Attachment` rows.
-- Mounted local development uploads at `/uploads-local`.
-
-Remaining:
-
-- Convert CSV preview rows into confirmed trade/execution imports.
-- Add visual column mapper UI for unmatched CSV formats.
-- Add broker-specific parsing profiles for IBKR, TD Ameritrade, TradeStation, NinjaTrader, MT4/MT5, and generic OHLCV exports.
-- Add spreadsheet paste preview/import confirmation.
-- Replace local upload storage with Cloudflare R2 and signed object URLs.
-- Add attachment annotation UI and JSON persistence.
-
-## Step 7: Reports and Exports
-
-Status: In progress
-
-Completed:
-
-- Added `/reports` hub with report cards, summary KPIs, and generation status.
-- Added `/reports/performance` printable performance report with summary KPIs, setup breakdown, top wins, and top losses.
-- Added `/reports/tax-csv` download route using the tax CSV export service.
-- Added `/reports/prop-firm` report with prop account limits, P&L, daily loss utilisation, and total drawdown utilisation.
-
-Remaining:
-
-- Add true PDF rendering with `@react-pdf` equivalent or a Python PDF renderer.
-- Add background report generation jobs and persisted download links.
-- Add period/account selectors for reports.
-- Add chart image embedding into generated performance reports.
-- Add prop firm consistency score and days-traded calculations.
-
-## Step 8: AI Coaching
-
-Status: In progress
-
-Completed:
-
-- Added `/coaching` dashboard with performance context, setup scorecard, latest AI insights, and generate action.
-- Added `POST /coaching/generate` to build a coaching payload and persist `AIInsight` records using the Anthropic-ready AI service.
-- Added `/coaching/chat` Ask the Coach interface with deterministic data-grounded responses from current stats, setup breakdown, and recent trades.
-- Added `/coaching/prompts` journal prompt generator based on selected date and that day's trades.
-- Reused the configured Anthropic service path, with graceful fallback when `ANTHROPIC_API_KEY` is not configured.
-
-Remaining:
-
-- Add streaming Claude chat responses.
-- Add weekly summary cron/background job and Monday delivery.
-- Add four-hour debounce and Redis-backed rate limiting for on-demand insight generation.
-- Add supporting-trade filters and links from each insight.
-- Expand setup scorecards with common mistakes, hold time, expectancy, and AI narrative per setup.
-
-## Step 9: Billing and Subscriptions
-
-Status: In progress
-
-Completed:
-
-- Added `BillingSubscription` and `BillingInvoice` models for provider-ready subscription and invoice state.
-- Added `/settings/billing` page with current plan, subscription status, plan comparison cards, feature gates, billing portal action, and invoice history.
-- Added `POST /settings/billing/checkout` local checkout flow to change plans, create subscription records, and create paid invoice rows for paid plans.
-- Added `POST /settings/billing/portal` local development portal placeholder.
-- Added visible feature gate status for Reports, AI Coaching, and Community by plan.
-
-Remaining:
-
-- Integrate real Stripe Checkout sessions.
-- Integrate Stripe Billing Portal sessions.
-- Add webhook handling for subscription, invoice, payment failure, and cancellation events.
-- Enforce plan gates across protected routes rather than displaying status only.
-- Add cancellation and invoice hosted URL flows.
-
-## Step 10: Community and Mentor Features
-
-Status: In progress
-
-Completed:
-
-- Added `PublicTradeShare`, `LeaderboardProfile`, `MentorAccess`, and `MentorComment` models.
-- Added `/community` page with leaderboard opt-in, public leaderboard table, public trade share list, and mentor entry point.
-- Added `POST /community/leaderboard` to save public leaderboard profile and preferred ranking metric.
-- Added `POST /trades/{trade_id}/share` to create anonymized public trade share links.
-- Added `/share/{slug}` public trade page showing symbol, direction, setup, and R-multiple without dollar P&L.
-- Added `/community/mentor` page to grant mentor access and view mentor feedback.
-- Added mentor access creation and mentor comment creation flows.
-
-Remaining:
-
-- Add share buttons directly in trade history rows.
-- Add Twitter/X image card generation and Open Graph metadata.
-- Add normalized leaderboard filters by asset class, timeframe, and account type.
-- Add mentor invitation emails, authentication, and true read-only mentor sessions.
-- Add mentor comment notifications and comment resolution workflow.
-
-## Step 11: Production Hardening
-
-Status: In progress
-
-Completed:
-
-- Added shared security headers for API and web responses.
-- Added in-memory rate limiting middleware for sensitive auth, AI, upload, import, and billing endpoints.
-- Added `/livez` and `/readyz` API endpoints.
-- Added database readiness check and Redis availability check.
-- Added tests for the rate limiter and security headers.
-- Added `scripts/verify_environment.py` for deployment environment checks without printing secrets.
-- Documented deployment verification commands in `README.md`.
-- Added tests for required environment validation, JWT secret validation, and network-skip mode.
-- Added Redis-backed JSON cache helper with in-memory fallback.
-- Added 5-minute caching for analytics summary and grouped performance reads.
-- Added analytics cache invalidation after daily stats rebuilds.
-- Added tests for cache fallback, prefix deletion, and Decimal restoration.
-- Added RQ task functions for analytics rebuilds, report generation, tax CSV generation, AI insight generation, and CSV import previews.
-- Added enqueue helpers for analytics, imports, reports, and AI queues.
-- Updated API AI/report endpoints to enqueue background work.
-- Documented RQ worker startup and queue names in `README.md`.
-- Added tests for enqueue helper queue/function routing.
-- Added JSON request logging, generated/preserved `X-Request-ID` headers, and optional Sentry initialization from `SENTRY_DSN`.
-- Replaced single-process-only sensitive endpoint throttling with Redis-backed rate limiting and an in-memory fallback when Redis is unavailable.
-- Added tests for Redis rate limiting, fallback behavior, structured log formatting, and user-scoped account/trade/journal ownership lookups.
-- Added `scripts/smoke_check.py` to call deployed `/livez`, `/readyz`, and `/healthz` endpoints.
-- Documented post-deploy smoke-check usage in `README.md`.
-- Added tests for smoke-check success/failure behavior and route-level auth/ownership boundaries.
-- Added auth token lifecycle tests for registration verification tokens, email verification, magic-link single-use behavior, and password reset single-use behavior.
-- Added API boundary tests for CSV import ownership, import history account scoping, screenshot upload validation, and authenticated report queue ownership.
-- Added screenshot upload validation for supported image MIME types and path-like file names.
-- Added web flow tests for local billing checkout, leaderboard profile create/update, public trade sharing ownership, mentor access grants, and mentor comment ownership.
-- Completed final security review across row-level ownership, auth token lifecycle, uploads, public sharing, mentor access, rate limits, observability, and deployment checks.
-- Patched final review gaps: API upload deletion ownership checks, expanded sensitive POST rate-limit coverage, and stricter web upload validation.
-
-Remaining:
-
-- Production integrations: real email delivery, Cloudflare R2 uploads, Stripe billing, OAuth, and frontend polish.
+Goal: take TradzLog from a working single-user product to a paid SaaS at **tradzlog.co.uk**,
+hosted on the existing AWS EC2 instance next to Mizan, with screenshots in S3.
+
+Last updated: 8 October 2026. The previous feature-by-feature plan is in git history
+(before commit `dc7b652`).
+
+---
+
+## Where things stand
+
+**Working today**
+
+- API (FastAPI): email/password auth with JWT, one-time tokens for verification, reset and
+  magic links, per-user ownership checks, rate limits, structured logs, health checks.
+- Web app: redesigned dashboard, trades, log-trade form with live risk preview, trade detail,
+  analytics (six views), all driven by one account and date-range filter. Journal, positions,
+  portfolio, reports, coaching, billing and community pages exist in the older style.
+- Screenshots: private S3 storage with signed links (local disk in development).
+- Deployment kit for EC2 alongside Mizan, CI/CD workflow, and a step-by-step guide
+  ([docs/DEPLOY_AWS.md](docs/DEPLOY_AWS.md)). Rehearsed locally; not yet deployed.
+- 67 automated tests.
+
+**Gaps that block a paid launch**
+
+| Gap                                                                                       | Why it matters                                                                     |
+| ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| The web app has no sign-in: all 34 page handlers act as the first user in the database    | Every visitor would see and change the same person's data                          |
+| Billing is simulated: "Upgrade" grants a paid plan and writes a fake invoice              | No revenue; misleading invoices                                                    |
+| Paid plans are not enforced anywhere                                                      | Free users get everything                                                          |
+| The pricing cards advertise "Trade replay", "Priority insights" and "Unlimited trades"    | None exist (no Free trade limit either); selling missing features is a legal risk  |
+| No email is sent (verification, reset, magic links create tokens only)                    | Users cannot verify or recover accounts                                            |
+| The only database migration calls `create_all`                                            | Future schema changes cannot be rolled out safely                                  |
+| CSV import stops at a preview                                                             | Manual entry only; the main reason traders churn                                   |
+| Anyone can register through the public API                                                | Fine once sign-in exists; risky during the private beta                            |
+| No terms, privacy policy, risk disclaimer, data export or account deletion                | Required under UK GDPR and for card payments                                       |
+
+---
+
+## Milestones
+
+| #  | Milestone                       | Outcome                                                  | Effort\*  | Depends on |
+| -- | ------------------------------- | -------------------------------------------------------- | --------- | ---------- |
+| M0 | Private beta on AWS             | Live at tradzlog.co.uk behind a password, for you only   | 1–2 days  | —          |
+| M1 | Real accounts and sign-in       | Many users, each seeing only their own data              | 5–7 days  | M0         |
+| M2 | Billing and plan limits         | Stripe subscriptions, enforced plans, honest pricing     | 4–5 days  | M1         |
+| M3 | Broker import                   | Traders bring their history in minutes                   | 5–8 days  | M1         |
+| M4 | Public launch readiness         | Landing page, onboarding, legal, email, GDPR tools       | 5–7 days  | M1, M2     |
+| M5 | Product depth                   | Journal, reports, AI coaching and prop-firm tools polished | ongoing | M1         |
+| M6 | Operations and growth           | Monitoring, admin, analytics, referrals                  | ongoing   | M0         |
+
+\* Focused working days, rough. **Public launch = M0–M4.** M2 and M3 can run in parallel after M1.
+
+---
+
+## M0. Private beta on AWS
+
+Get the current build running on the real server early, so every later milestone ships
+continuously rather than in one risky first deploy.
+
+**Tasks**
+
+1. **Real baseline migration** (before the production database exists). Replace
+   `0001_initial_schema.py` (`create_all`) with explicit `op.create_table` calls generated by
+   `alembic revision --autogenerate` against an empty database. Add `alembic check` to CI so a
+   model change without a migration fails the build.
+2. **Registration switch.** Add `REGISTRATION_OPEN` (default `false` in production): when off,
+   `POST /api/auth/register` needs an invite code from Parameter Store. Closes the open-API gap
+   until M1.
+3. **Current Claude model.** Change the `anthropic_model` default in `config.py` from
+   `claude-sonnet-4-20250514` to `claude-sonnet-5-5`, which the production compose file already uses.
+4. **Provision and deploy** following [docs/DEPLOY_AWS.md](docs/DEPLOY_AWS.md): S3 bucket, IAM
+   policy and metadata hop limit, `install.sh`, Parameter Store, DNS, GitHub secrets, then push.
+5. **Watch memory** for a week (`docker stats`, `free -m`). Move to t4g.medium if swap is in steady use.
+
+**Done when** `https://tradzlog.co.uk` asks for the beta password, you can log trades and upload a
+screenshot, `/api/health` is green in an uptime monitor, and a nightly backup has landed in S3.
+
+---
+
+## M1. Real accounts and sign-in (launch blocker)
+
+**Approach:** server-side sessions for the web app (it is server-rendered), reusing the
+existing password hashing and one-time tokens. Keep JWT for the API.
+
+**Tasks**
+
+1. **Sessions.** `web_sessions` table (id hash, user, created, last seen, expiry, user agent).
+   An `HttpOnly; Secure; SameSite=Lax` cookie holds a random session id. 30-day sliding expiry,
+   rotation on sign-in, "sign out everywhere".
+2. **Pages:** sign up, sign in, sign out, forgot password, reset password, verify email, using the
+   new design system. Rate limits already exist; add a lockout after repeated failures.
+3. **Replace `first_user()`** in all 34 handlers with a `current_user` dependency that redirects
+   to `/login` when signed out. Delete `demo_user()`.
+4. **CSRF protection** on every POST form: a per-session token checked by middleware.
+5. **Isolation tests:** create two users, then crawl every web route as user B against user A's
+   ids (trades, journals, uploads, shares, mentor records) and assert 404s. Run in CI.
+6. **Account management UI:** create, edit and archive trading accounts (portfolio page),
+   profile, change email and password, timezone (date ranges and the P&L calendar should use it).
+7. **Optional: Google sign-in** (`GOOGLE_CLIENT_ID` is already in the settings).
+8. Remove the Caddy basic-auth gate: set `TRADZLOG_PUBLIC=true`, delete the two basic-auth
+   parameters, and set `REGISTRATION_OPEN=true` when ready.
+
+**Done when** two people can sign up independently, neither can reach the other's data through
+any page or API route (proved by the isolation tests), and the site runs without the gate.
+
+---
+
+## M2. Billing and plan limits
+
+**Tasks**
+
+1. **Decide prices and currency** (see open decisions). Update `PLAN_DETAILS` so the cards only
+   list features that exist.
+2. **Stripe Checkout** for upgrades and the **Stripe Billing Portal** for card changes,
+   cancellation and invoices. Remove the simulated checkout and fake invoices.
+3. **Webhook** at `POST /api/billing/stripe-webhook` (under `/api`, so outside any gate):
+   signature check, idempotent handling of `checkout.session.completed`,
+   `customer.subscription.updated/deleted`, `invoice.paid` and `invoice.payment_failed`. The
+   plan changes only here, never from a button click.
+4. **Entitlements in one module** (`tradzlog_api/services/entitlements.py`): limits per plan, for
+   example accounts, trades per month, screenshots storage, AI insights per week, reports. One
+   `require(user, feature)` used by web and API routes; locked features show an upgrade prompt
+   rather than an error.
+5. **Stripe Tax** for UK VAT; receipts from Stripe.
+6. **Dunning:** a payment-failed banner, then downgrade to Free at period end (data kept).
+
+**Done when** a test-mode card upgrades a user via the webhook, cancelling in the portal
+downgrades them at period end, and every limit is covered by a test.
+
+---
+
+## M3. Broker import
+
+The feature that decides whether traders stay: nobody types in 200 trades.
+
+**Tasks**
+
+1. **Confirm step:** turn the existing preview into real executions, grouped into round-trip
+   trades (FIFO per symbol and account), with metrics and stats rebuilt.
+2. **Duplicate detection** by broker order id plus a fingerprint (symbol, time, price, quantity),
+   so re-importing a file is safe.
+3. **Broker profiles,** in order of demand: Interactive Brokers (Flex Query CSV), MetaTrader 4/5
+   statements, Tradovate / NinjaTrader, TradingView paper trading, then a generic mapper.
+4. **Column mapper UI** for unknown formats: map columns once, save as a reusable profile.
+5. **Background processing** through the existing RQ `imports` queue for large files, with a
+   progress state and an import summary (created, skipped as duplicates, failed rows with reasons).
+6. **Undo import:** delete everything created by one import batch.
+7. **Instrument resolution:** create missing instruments with sensible defaults per asset class
+   and ask the user to confirm point values for futures and forex.
+
+**Done when** a real IBKR and MT5 export import correctly (P&L matches the broker statement),
+re-importing creates no duplicates, and an import can be undone.
+
+---
+
+## M4. Public launch readiness
+
+**Tasks**
+
+1. **Landing site:** signed-out visitors to `/` see a landing page; `/pricing`, `/features`,
+   `/security`. Signed-in users go straight to the dashboard.
+2. **Onboarding:** create a trading account → import or log a first trade → dashboard.
+   Optional sample data the user can clear in one click.
+3. **Transactional email** (provider decision below): welcome, verify, reset, magic link,
+   receipts and failed payments (from Stripe), import finished. Sent via the RQ queue, with
+   SPF, DKIM and DMARC set on the domain.
+4. **Legal pages:** terms, privacy policy, cookie notice (no tracking cookies means no banner is
+   needed), and a clear "not financial advice" statement, shown in AI coaching too.
+5. **UK GDPR tools:** export my data (JSON and CSV, plus a zip of screenshots from the user's S3
+   prefix) and delete my account (database cascade plus S3 prefix deletion, then confirmation email).
+6. **ICO registration:** pay the UK data protection fee as the data controller.
+7. **Finish the redesign** for the pages still in the older style: journal, positions, portfolio,
+   reports, coaching, billing and community. Add empty states and error pages (404, 500, rate limited).
+8. **Scope check:** hide Community and Mentor features behind a flag for launch unless they are
+   finished (mentor sign-in and invitations do not exist yet).
+
+**Done when** a stranger can find the site, understand it, sign up, import trades, pay, and
+delete their account, without help.
+
+---
+
+## M5. Product depth (after launch, ordered by value)
+
+1. **Journal:** edit and delete entries, search, tags, templates, screenshots inline, a daily
+   review that auto-includes the day's stats and trades.
+2. **Prop-firm tools:** live daily-loss and max-drawdown tracking against each firm's rules,
+   consistency score, alerts before a limit is hit. The account model already has the fields.
+3. **Reports:** real PDF output (WeasyPrint, from the existing HTML report), period and account
+   selectors, charts embedded, generated in the background with a download link.
+4. **AI coaching:** generate insights in the background on the current Claude model, cap usage
+   per plan, link each insight to the trades behind it, weekly email summary, stream chat answers.
+5. **Trades:** multiple executions per trade (scale in and out), inline edit, review flag,
+   richer filters (outcome, tags, P&L range), export.
+6. **Analytics:** R-multiple distribution, rolling expectancy, period comparison.
+7. **Screenshot annotation** (the `annotation_data` column is ready).
+
+---
+
+## M6. Operations and growth (continuous)
+
+- **Monitoring:** Sentry (wired, needs a DSN), uptime monitor on `/api/health`, CloudWatch alarm
+  on instance status checks, log retention.
+- **Admin page:** users, plans, subscriptions, impersonation for support (logged in an audit log).
+- **Audit log** for sign-ins, plan changes, exports and deletions.
+- **Product analytics** without cookies (Plausible or similar): sign-up → first trade → import → paid.
+- **Referral codes** and an annual-plan discount.
+- **Quality:** fix the existing long-line lint warnings and enforce full ruff; add mypy; run the
+  production-stack rehearsal (compose, Caddy, S3 stand-in) in CI.
+- **Status page** and a restore drill for backups every quarter.
+
+---
+
+## Open decisions
+
+| Decision                         | Options                                                    | Recommendation                                                                 |
+| -------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Prices and currency              | Current $29 / $79; or GBP; monthly and annual              | GBP for a .co.uk brand, with annual at two months free                          |
+| Email provider                   | Amazon SES (same AWS account) or Resend (Mizan uses both)  | SES: already on AWS, cheapest; Resend if you prefer its dashboard               |
+| Google sign-in at launch         | Yes / later                                                | Later: email sign-in first, fewer moving parts                                 |
+| Community and Mentor at launch   | Ship / hide                                                | Hide until mentor sign-in exists                                               |
+| Instance size                    | Stay on t4g.small / move to t4g.medium                     | Decide after a week of M0 memory data                                           |
+| Legal entity for Stripe and ICO  | Sole trader / limited company                              | Your call; needed before M2 goes live                                          |
+
+---
+
+## Working agreements
+
+- Every change ships through CI to the EC2 server; no manual edits on the server.
+- Every schema change comes with an Alembic migration, and stays backwards compatible for one release.
+- Every new page or route gets an ownership test once M1 lands.
+- Settings and secrets live only in Parameter Store under `/tradzlog/`.
