@@ -20,7 +20,6 @@ from tradzlog_api.services.analytics import (
     grouped_performance,
     rebuild_daily_stats,
     rebuild_equity_curve,
-    streaks,
     summary,
 )
 from tradzlog_api.services.hardening import SECURITY_HEADERS, rate_limiter
@@ -43,7 +42,6 @@ from tradzlog_db.models import (
     BrokerSync,
     BrokerSyncStatus,
     BrokerSyncType,
-    DailyStats,
     Direction,
     Execution,
     ExecutionType,
@@ -64,6 +62,23 @@ from tradzlog_db.models import (
     User,
 )
 from tradzlog_db.session import SessionLocal
+from tradzlog_web import book
+from tradzlog_web.components import (
+    edge_bars,
+    equity_chart,
+    execution_timeline,
+    filter_bar,
+    hold_time,
+    kpi,
+    money,
+    number,
+    pnl_calendar,
+    price_ladder,
+    query_string,
+    short_datetime,
+    tone,
+    trade_table,
+)
 from tradzlog_web.ui import (
     coach_quality_badge,
     empty_state,
@@ -149,26 +164,6 @@ async def web_security_headers(request: Request, call_next):
     )
     return response
 
-def money(value: Decimal | int | float | None) -> str:
-    amount = Decimal(value or 0)
-    sign = "-" if amount < 0 else ""
-    return f"{sign}${abs(amount):,.2f}"
-
-
-def number(value: Decimal | int | float | None, suffix: str = "") -> str:
-    amount = Decimal(value or 0)
-    return f"{amount:,.2f}{suffix}"
-
-
-def tone(value: Decimal | int | float | None) -> str:
-    amount = Decimal(value or 0)
-    if amount > 0:
-        return "positive"
-    if amount < 0:
-        return "negative"
-    return "neutral"
-
-
 def demo_user() -> tuple[User | None, str | None]:
     session = SessionLocal()
     try:
@@ -180,127 +175,153 @@ def demo_user() -> tuple[User | None, str | None]:
         session.close()
 
 
-def sparkline(points: list[Decimal]) -> str:
-    if len(points) < 2:
-        return empty_state(
-            "No equity data yet",
-            "Equity curve will appear after daily snapshots are generated.",
-            icon="📈",
-        )
-    width = Decimal("900")
-    height = Decimal("190")
-    min_value = min(points)
-    max_value = max(points)
-    span = max(max_value - min_value, Decimal("1"))
-    coords = []
-    for index, value in enumerate(points):
-        x = Decimal(index) / Decimal(len(points) - 1) * width
-        y = height - ((value - min_value) / span * (height - Decimal("18"))) - Decimal("9")
-        coords.append(f"{x:.2f},{y:.2f}")
-    return f"""<svg class="spark" viewBox="0 0 900 190" role="img" aria-label="Equity curve">
-      <line class="axis" x1="0" y1="160" x2="900" y2="160"></line>
-      <polyline points="{' '.join(coords)}"></polyline>
-    </svg>"""
+def today_utc() -> date:
+    return datetime.now(UTC).date()
 
 
-def dashboard_data(account_id: str | None) -> dict[str, object]:
-    session = SessionLocal()
-    try:
-        user = session.scalar(select(User).order_by(User.created_at.asc()))
-        if user is None:
-            return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
-        accounts = session.scalars(
+def first_user(session) -> User | None:
+    return session.scalar(select(User).order_by(User.created_at.asc()))
+
+
+def load_book(session, user: User, account_id: str | None) -> tuple[list[Account], Account | None, list[Trade]]:
+    """Accounts, the selected account (None = all), and every trade in scope, newest first."""
+    accounts = list(
+        session.scalars(
             select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None)).order_by(Account.created_at)
         ).all()
-        active_account = next((account for account in accounts if account.id == account_id), accounts[0] if accounts else None)
-        metrics = summary(session, user.id, active_account.id if active_account else None)
-        setup_rows = grouped_performance(session, user.id, "setup")[:6]
-        recent_trades = session.scalars(
+    )
+    selected = next((account for account in accounts if account.id == account_id), None)
+    scope = [selected.id] if selected else [account.id for account in accounts]
+    if not scope:
+        return accounts, selected, []
+    trades = list(
+        session.scalars(
             select(Trade)
-            .options(selectinload(Trade.metrics), selectinload(Trade.instrument))
-            .where(Trade.user_id == user.id)
+            .options(selectinload(Trade.metrics), selectinload(Trade.instrument), selectinload(Trade.account))
+            .where(Trade.user_id == user.id, Trade.account_id.in_(scope))
             .order_by(Trade.opened_at.desc())
-            .limit(10)
         ).all()
-        snapshots = []
-        if active_account is not None:
-            snapshots = session.scalars(
-                select(AccountSnapshot)
-                .where(AccountSnapshot.account_id == active_account.id)
-                .order_by(AccountSnapshot.date.asc())
-            ).all()
-        return {
-            "user": user,
-            "accounts": accounts,
-            "account": active_account,
-            "summary": metrics,
-            "setups": setup_rows,
-            "recent_trades": recent_trades,
-            "equity": [row.balance for row in snapshots],
-        }
+    )
+    return accounts, selected, trades
+
+
+def closed_in(trades: list[Trade], period: book.Period, previous: bool = False) -> list[Trade]:
+    selected = []
+    for trade in trades:
+        day = book.closed_day(trade)
+        if trade.status != TradeStatus.CLOSED or day is None:
+            continue
+        if period.contains_previous(day) if previous else period.contains(day):
+            selected.append(trade)
+    return selected
+
+
+def opening_balance(accounts: list[Account], trades: list[Trade], period: book.Period) -> Decimal:
+    balance = sum((account.starting_balance for account in accounts), Decimal("0"))
+    if period.start is not None:
+        balance += sum(
+            (book.pnl(trade) for trade in trades
+             if trade.status == TradeStatus.CLOSED and (day := book.closed_day(trade)) is not None and day < period.start),
+            Decimal("0"),
+        )
+    return balance
+
+
+def parse_month(value: str | None, fallback: date) -> date:
+    try:
+        return datetime.strptime(value, "%Y-%m").date() if value else fallback.replace(day=1)
+    except ValueError:
+        return fallback.replace(day=1)
+
+
+def drawdown_note(selected: Account | None) -> str:
+    if selected is not None and selected.max_total_loss and selected.starting_balance:
+        limit = selected.max_total_loss / selected.starting_balance * Decimal("100")
+        return f"Limit -{limit:.1f}%"
+    return "Peak to trough"
+
+
+def kpi_strip(current: book.Stats, previous: book.Stats | None, max_dd: Decimal, dd_note: str) -> str:
+    if previous is None:
+        net_note, net_note_tone = f"{current.trades} closed trades", ""
+    else:
+        change = book.percent_change(current.net_pnl, previous.net_pnl)
+        delta = current.net_pnl - previous.net_pnl
+        net_note = f"{money(delta, signed=True)} vs prior period" + (f" ({change:+.0f}%)" if change is not None else "")
+        net_note_tone = tone(delta)
+    pf = current.profit_factor
+    pf_tone = "" if pf is None else ("positive" if pf >= Decimal("1.5") else "negative" if pf < 1 else "")
+    hold = f"Avg hold {hold_time(int(current.average_hold_hours * 3600))}" if current.average_hold_hours is not None else "per trade"
+    return f"""<section class="kpi-row">
+      {kpi("Net P&L", money(current.net_pnl, signed=True), tone(current.net_pnl), net_note, net_note_tone)}
+      {kpi("Win rate", number(current.win_rate, "%"), "", f"{current.wins} / {current.trades} trades")}
+      {kpi("Profit factor", number(pf) if pf is not None else "—", pf_tone, "Target ≥ 1.50")}
+      {kpi("Expectancy", number(current.expectancy_r, "R") if current.expectancy_r is not None else "—", tone(current.expectancy_r), hold)}
+      {kpi("Max drawdown", number(max_dd, "%"), "negative" if max_dd < 0 else "", dd_note)}
+    </section>"""
+
+
+def no_user_page(title: str, active: str) -> str:
+    return shell(title, active, empty_state("No trader profile yet", "Run `python prisma/seed.py` to load demo data."))
+
+
+def render_dashboard(account_id: str | None = None, range_code: str | None = None, month: str | None = None) -> str:
+    session = SessionLocal()
+    try:
+        user = first_user(session)
+        if user is None:
+            return no_user_page("Dashboard", "dashboard")
+        today = today_utc()
+        period = book.resolve_period(range_code, today)
+        accounts, selected, trades = load_book(session, user, account_id)
+        scope_accounts = [selected] if selected else accounts
+        current = closed_in(trades, period)
+        previous = book.stats(closed_in(trades, period, previous=True)) if period.previous_start else None
+        current_stats = book.stats(current)
+        opening = opening_balance(scope_accounts, trades, period)
+        curve = book.equity_curve(opening, current)
+        closing = curve[-1].balance if curve else opening
+        account_param = selected.id if selected else None
+        nav_href = "/dashboard" + query_string({"account_id": account_param, "range": period.code})
+        recent = [trade for trade in trades if period.contains(trade.opened_at.date())][:8]
+        setups = book.by_expectancy(book.group_by(current, lambda trade: trade.setup_tag or "Untagged"))
+        instruments = book.by_expectancy(book.group_by(current, lambda trade: trade.instrument.symbol))
+        all_closed = [trade for trade in trades if trade.status == TradeStatus.CLOSED]
+        body = f"""
+          {filter_bar("/dashboard", accounts, account_param, period)}
+          {kpi_strip(current_stats, previous, book.max_drawdown_pct(curve), drawdown_note(selected))}
+          <section class="dash-grid">
+            <div class="card">
+              <div class="card-title"><h2>Equity curve</h2><span class="meta">{money(opening)} → <b class="{tone(closing - opening)}">{money(closing)}</b></span></div>
+              {equity_chart(curve, opening)}
+            </div>
+            <div class="card">{pnl_calendar(parse_month(month, today), book.daily_pnl(all_closed), today, nav_href)}</div>
+          </section>
+          <section class="grid two-col" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-bottom:14px">
+            <div class="card"><div class="card-title"><h2>Edge by setup</h2><span class="meta">Expectancy per trade</span></div>{edge_bars(setups)}</div>
+            <div class="card"><div class="card-title"><h2>Edge by instrument</h2><span class="meta">Expectancy per trade</span></div>{edge_bars(instruments)}</div>
+          </section>
+          <section class="card">
+            <div class="card-title"><h2>Recent trades</h2><a class="btn btn-sm" href="/trades{escape(query_string({"account_id": account_param, "range": period.code}))}">View all</a></div>
+            {trade_table(recent, today, show_account=selected is None)}
+          </section>
+        """
+        return shell("Dashboard", "dashboard", body, selected.name if selected else "All accounts", user.name or user.email)
     except SQLAlchemyError as exc:
-        return {"error": str(exc)}
+        logger.exception("dashboard failed")
+        return shell("Dashboard", "dashboard", empty_state("Dashboard unavailable", type(exc).__name__))
     finally:
         session.close()
 
 
-
-
-def render_dashboard(account_id: str | None = None) -> str:
-    data = dashboard_data(account_id)
-    if "error" in data:
-        body = empty_state("Dashboard unavailable", str(data["error"]))
-        return shell("Dashboard", "dashboard", body, show_range=False)
-    user = data["user"]
-    account = data["account"]
-    metrics = data["summary"]
-    account_tabs = filter_tabs(
-        [("All accounts", "/dashboard", account is None)]
-        + [
-            (account_row.name, f"/dashboard?account_id={escape(account_row.id)}", account and account.id == account_row.id)
-            for account_row in data["accounts"]
-        ]
-    )
-    setup_rows = "".join(
-        f"""<tr><td>{escape(str(row["key"]))}</td><td class="num">{row["trades"]}</td><td class="num {tone(row["netPnl"])}">{money(row["netPnl"])}</td><td class="num">{number(row["winRate"], "%")}</td><td class="num">{number(row["averageR"], "R")}</td></tr>"""
-        for row in data["setups"]
-    ) or '<tr><td colspan="5" class="muted">No setup data yet.</td></tr>'
-    recent_rows = "".join(
-        f"""<tr><td>{escape(trade.opened_at.strftime("%Y-%m-%d"))}</td><td>{escape(trade.instrument.symbol)}</td><td>{side_badge(trade.direction.value)}</td><td>{escape(trade.setup_tag or "Unassigned")}</td><td class="num {tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td><td class="num">{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td></tr>"""
-        for trade in data["recent_trades"]
-    ) or '<tr><td colspan="6" class="muted">No trades logged yet.</td></tr>'
-    body = f"""
-      <div class="toolbar page-block">{account_tabs}</div>
-      <section class="grid kpis page-block">
-        {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "Selected account")}
-        {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
-        {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "Gross winners / losers")}
-        {kpi_card("Total Trades", str(metrics["trades_count"]), "neutral", "Closed positions")}
-        {kpi_card("Avg R", number(metrics["average_r"], "R"), tone(metrics["average_r"]), "Expectancy proxy")}
-        {kpi_card("Avg Hold", number(Decimal(metrics["average_hold_seconds"]) / Decimal("3600"), "h"), "neutral", "Time in trade")}
-      </section>
-      <section class="grid two-col">
-        <div class="card">
-          <div class="section-head"><div><div class="label">Equity Curve</div><h2 style="margin:4px 0 0">Balance Over Time</h2></div><span class="badge">Net P&L</span></div>
-          {sparkline(data["equity"])}
-        </div>
-        <div class="card">
-          <div class="section-head"><div><div class="label">Setup Scoreboard</div><h2 style="margin:4px 0 0">Best Edges</h2></div></div>
-          <table><thead><tr><th>Setup</th><th>Trades</th><th>Net</th><th>Win</th><th>Avg R</th></tr></thead><tbody>{setup_rows}</tbody></table>
-        </div>
-      </section>
-      <section class="card" style="margin-top:16px">
-        <div class="section-head"><div><div class="label">Recent Trades</div><h2 style="margin:4px 0 0">Execution Feed</h2></div><a class="pill" href="/trades">View All</a></div>
-        <table><thead><tr><th>Date</th><th>Symbol</th><th>Side</th><th>Setup</th><th>Net P&L</th><th>R</th></tr></thead><tbody>{recent_rows}</tbody></table>
-      </section>
-    """
-    return shell("Dashboard", "dashboard", body, account.name if account else "All Accounts", user.name or user.email)
-
-
 @app.get("/", response_class=HTMLResponse)
 @app.get("/dashboard", response_class=HTMLResponse)
-def dashboard(account_id: str | None = Query(default=None)) -> str:
-    return render_dashboard(account_id)
+def dashboard(
+    account_id: str | None = Query(default=None),
+    range_code: str | None = Query(default=None, alias="range"),
+    month: str | None = Query(default=None),
+) -> str:
+    return render_dashboard(account_id, range_code, month)
 
 
 @app.get("/settings")
@@ -382,131 +403,219 @@ def portfolio() -> str:
     return shell("Portfolio", "portfolio", body, "All Accounts", user.name or user.email)
 
 
-def first_user(session) -> User | None:
-    return session.scalar(select(User).order_by(User.created_at.asc()))
-
-
-def trade_filters(status_filter: str | None, account_id: str | None) -> str:
-    current = (status_filter or "ALL").upper()
-    tabs = filter_tabs(
-        [
-            ("All", "/trades", current == "ALL"),
-            ("Open", "/trades?status_filter=OPEN", current == "OPEN"),
-            ("Closed", "/trades?status_filter=CLOSED", current == "CLOSED"),
-            ("Cancelled", "/trades?status_filter=CANCELLED", current == "CANCELLED"),
-        ]
-    )
-    extra = '<a class="btn btn-primary" href="/trades/new">Log Trade</a>'
-    if account_id:
-        extra += ' <span class="badge">Account filter active</span>'
-    return f'<div class="toolbar page-block">{tabs}{extra}</div>'
-
-
-def load_trade_page_data(status_filter: str | None, account_id: str | None) -> dict[str, object]:
-    session = SessionLocal()
-    try:
-        user = first_user(session)
-        if user is None:
-            return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
-        query = (
-            select(Trade)
-            .options(selectinload(Trade.metrics), selectinload(Trade.instrument), selectinload(Trade.account))
-            .where(Trade.user_id == user.id)
-            .order_by(Trade.opened_at.desc())
-        )
-        if status_filter:
-            query = query.where(Trade.status == TradeStatus(status_filter))
-        if account_id:
-            query = query.where(Trade.account_id == account_id)
-        trades = session.scalars(query.limit(200)).all()
-        return {"user": user, "trades": trades}
-    except (SQLAlchemyError, ValueError) as exc:
-        return {"error": str(exc)}
-    finally:
-        session.close()
+TRADE_STATUS_TABS = (("All", None), ("Open", "OPEN"), ("Closed", "CLOSED"), ("Cancelled", "CANCELLED"))
 
 
 @app.get("/trades", response_class=HTMLResponse)
-def trades(status_filter: str | None = Query(default=None), account_id: str | None = Query(default=None)) -> str:
-    data = load_trade_page_data(status_filter, account_id)
-    if "error" in data:
-        return shell("Trades", "trades", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    rows = "".join(
-        f"""<tr>
-          <td>{escape(trade.opened_at.strftime("%Y-%m-%d %H:%M"))}</td>
-          <td><a class="pill" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)}</a></td>
-          <td>{side_badge(trade.direction.value)}</td>
-          <td>{escape(trade.account.name)}</td>
-          <td>{escape(trade.setup_tag or "Unassigned")}</td>
-          <td>{money(trade.metrics.average_entry if trade.metrics else trade.planned_entry)}</td>
-          <td>{money(trade.metrics.average_exit if trade.metrics else None)}</td>
-          <td class="{tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td>
-          <td>{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td>
-          <td>{status_badge(trade.status.value)}</td>
-        </tr>"""
-        for trade in data["trades"]
-    ) or '<tr><td colspan="10" class="muted">No trades match these filters.</td></tr>'
-    body = f"""
-      {trade_filters(status_filter, account_id)}
-      <section class="card" style="margin-top:16px">
-        <div class="section-head"><div><div class="label">Trade History</div><h2 style="margin:4px 0 0">Closed and Open Trades</h2></div></div>
-        <table><thead><tr><th>Opened</th><th>Symbol</th><th>Side</th><th>Account</th><th>Setup</th><th>Entry</th><th>Exit</th><th>Net P&L</th><th>R</th><th>Status</th></tr></thead><tbody>{rows}</tbody></table>
-      </section>
-    """
-    user = data["user"]
-    return shell("Trades", "trades", body, "Trade History", user.name or user.email)
-
-
-def new_trade_form_data() -> dict[str, object]:
+def trades(
+    status_filter: str | None = Query(default=None),
+    account_id: str | None = Query(default=None),
+    range_code: str | None = Query(default=None, alias="range"),
+) -> str:
     session = SessionLocal()
     try:
         user = first_user(session)
         if user is None:
-            return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
-        accounts = session.scalars(select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None))).all()
-        instruments = session.scalars(select(Instrument).order_by(Instrument.asset_class, Instrument.symbol).limit(200)).all()
-        return {"user": user, "accounts": accounts, "instruments": instruments}
-    except SQLAlchemyError as exc:
-        return {"error": str(exc)}
+            return no_user_page("Trades", "trades")
+        today = today_utc()
+        period = book.resolve_period(range_code or "ALL", today)
+        current_status = (status_filter or "").upper() or None
+        accounts, selected, all_trades = load_book(session, user, account_id)
+        account_param = selected.id if selected else None
+        rows = [
+            trade for trade in all_trades
+            # open positions stay visible whatever the range: they are still live risk
+            if (period.contains(trade.opened_at.date()) or trade.status == TradeStatus.OPEN)
+            and (current_status is None or trade.status.value == current_status)
+        ][:500]
+        tabs = filter_tabs([
+            (label, "/trades" + query_string({"status_filter": value, "account_id": account_param, "range": period.code}), value == current_status)
+            for label, value in TRADE_STATUS_TABS
+        ])
+        closed = [trade for trade in rows if trade.status == TradeStatus.CLOSED]
+        totals = book.stats(closed)
+        summary_line = (
+            f'<span class="muted small">{len(rows)} trades · net <b class="{tone(totals.net_pnl)}">{money(totals.net_pnl, signed=True)}</b>'
+            f" · {number(totals.win_rate, '%')} win rate</span>"
+        )
+        body = f"""
+          {filter_bar("/trades", accounts, account_param, period, {"status_filter": current_status})}
+          <section class="card">
+            <div class="toolbar">{tabs}{summary_line}</div>
+            {trade_table(rows, today, show_account=selected is None)}
+          </section>
+        """
+        return shell("Trades", "trades", body, selected.name if selected else "All accounts", user.name or user.email)
     finally:
         session.close()
 
 
+LOG_TRADE_SCRIPT = """
+(function () {
+  var form = document.getElementById("log-trade");
+  if (!form) return;
+  var opened = form.elements.opened_at;
+  if (opened && !opened.value) {
+    var now = new Date(); now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    opened.value = now.toISOString().slice(0, 16);
+  }
+  function num(name) { var v = parseFloat(form.elements[name].value); return isNaN(v) ? null : v; }
+  function fmt(v, d) { return v.toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d}); }
+  function usd(v) { return (v < 0 ? "-$" : "$") + fmt(Math.abs(v), 2); }
+  function set(id, text, cls) { var el = document.getElementById(id); el.textContent = text; if (cls !== undefined) el.className = cls; }
+  function update() {
+    var inst = form.elements.instrument_id.selectedOptions[0];
+    var acct = form.elements.account_id.selectedOptions[0];
+    var pv = inst ? parseFloat(inst.dataset.pv || "1") : 1;
+    var balance = acct ? parseFloat(acct.dataset.balance || "0") : 0;
+    var long = form.elements.direction.value !== "SHORT";
+    var entry = num("entry_price"), stop = num("planned_stop"), target = num("planned_target");
+    var qty = num("quantity"), exit = num("exit_price");
+    var fees = (num("entry_fees") || 0) + (num("exit_fees") || 0);
+    var warn = [];
+    var risk = null, reward = null;
+    if (entry !== null && stop !== null && qty) {
+      if (long ? stop >= entry : stop <= entry) warn.push("Stop is on the wrong side of entry for a " + (long ? "long" : "short") + ".");
+      risk = Math.abs(entry - stop) * qty * pv;
+    }
+    if (entry !== null && target !== null && qty) {
+      if (long ? target <= entry : target >= entry) warn.push("Target is on the wrong side of entry.");
+      reward = Math.abs(target - entry) * qty * pv;
+    }
+    set("pv-risk", risk !== null ? usd(risk) : "—");
+    set("pv-risk-pct", risk !== null && balance ? fmt(risk / balance * 100, 2) + "%" : "—");
+    set("pv-reward", reward !== null ? usd(reward) : "—");
+    set("pv-rr", risk && reward !== null ? fmt(reward / risk, 2) + "R" : "—", "big");
+    var closed = exit !== null && entry !== null && qty;
+    if (closed) {
+      var pnl = (long ? exit - entry : entry - exit) * qty * pv - fees;
+      set("pv-pnl", usd(pnl), pnl > 0 ? "positive" : pnl < 0 ? "negative" : "");
+      set("pv-r", risk ? fmt(pnl / risk, 2) + "R" : "—", pnl > 0 ? "positive" : pnl < 0 ? "negative" : "");
+    } else {
+      set("pv-pnl", "—", ""); set("pv-r", "—", "");
+    }
+    set("pv-status", closed ? "Saved as closed" : "Saved as open position");
+    var w = document.getElementById("pv-warn"); w.textContent = warn.join(" "); w.hidden = !warn.length;
+  }
+  form.addEventListener("input", update);
+  form.addEventListener("change", update);
+  update();
+})();
+"""
+
+
 @app.get("/trades/new", response_class=HTMLResponse)
-def new_trade() -> str:
-    data = new_trade_form_data()
-    if "error" in data:
-        return shell("New Trade", "trades", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    account_options = "".join(f'<option value="{escape(account.id)}">{escape(account.name)}</option>' for account in data["accounts"])
-    instrument_options = "".join(
-        f'<option value="{escape(instrument.id)}">{escape(instrument.symbol)} · {escape(instrument.asset_class.value)}</option>'
-        for instrument in data["instruments"]
+def new_trade(account_id: str | None = Query(default=None)) -> str:
+    session = SessionLocal()
+    try:
+        user = first_user(session)
+        if user is None:
+            return no_user_page("Log trade", "trades")
+        accounts = session.scalars(
+            select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None)).order_by(Account.created_at)
+        ).all()
+        if not accounts:
+            return shell("Log trade", "trades", empty_state("Create an account first", "Trades are logged against a trading account."), "Log trade", user.name or user.email)
+        instruments = session.scalars(select(Instrument).order_by(Instrument.symbol).limit(500)).all()
+        setup_tags = session.scalars(
+            select(Trade.setup_tag).where(Trade.user_id == user.id, Trade.setup_tag.is_not(None)).distinct().limit(50)
+        ).all()
+    finally:
+        session.close()
+    account_options = "".join(
+        f'<option value="{escape(account.id)}" data-balance="{account.starting_balance}" {"selected" if account.id == account_id else ""}>'
+        f"{escape(account.name)} · {escape(account.currency)}</option>"
+        for account in accounts
     )
+    instrument_options = "".join(
+        f'<option value="{escape(instrument.id)}" data-pv="{instrument.point_value or 1}">'
+        f"{escape(instrument.symbol)} — {escape(instrument.name)}</option>"
+        for instrument in instruments
+    )
+    setup_list = "".join(f'<option value="{escape(tag)}"></option>' for tag in sorted(setup_tags))
+    timeframes = "".join(f"<option>{tf}</option>" for tf in ("", "1m", "5m", "15m", "1h", "4h", "D", "W"))
+    decimal_input = 'type="number" step="any" inputmode="decimal"'
     body = f"""
-      <form class="card" style="margin-top:16px" method="post" action="/trades/new">
-        <div class="section-head"><div><div class="label">Manual Entry</div><h2 style="margin:4px 0 0">Log a Trade</h2></div><button class="primary" type="submit">Save Trade</button></div>
-        <div class="form-grid">
-          <div class="field"><label>Account</label><select name="account_id" required>{account_options}</select></div>
-          <div class="field"><label>Instrument</label><select name="instrument_id" required>{instrument_options}</select></div>
-          <div class="field"><label>Direction</label><select name="direction"><option>LONG</option><option>SHORT</option></select></div>
-          <div class="field"><label>Status</label><select name="trade_status"><option>OPEN</option><option>CLOSED</option></select></div>
-          <div class="field"><label>Setup Tag</label><input name="setup_tag" placeholder="ORB, VWAP Reclaim" /></div>
-          <div class="field"><label>Timeframe</label><select name="timeframe"><option>1m</option><option>5m</option><option>15m</option><option>1h</option><option>4h</option><option>D</option></select></div>
-          <div class="field"><label>Opened At</label><input type="datetime-local" name="opened_at" required /></div>
-          <div class="field"><label>Entry Price</label><input type="number" step="0.00000001" name="entry_price" required /></div>
-          <div class="field"><label>Quantity</label><input type="number" step="0.00000001" name="quantity" required /></div>
-          <div class="field"><label>Planned Stop</label><input type="number" step="0.00000001" name="planned_stop" /></div>
-          <div class="field"><label>Planned Target</label><input type="number" step="0.00000001" name="planned_target" /></div>
-          <div class="field"><label>Entry Fees</label><input type="number" step="0.01" name="entry_fees" value="0" /></div>
-          <div class="field"><label>Closed At</label><input type="datetime-local" name="closed_at" /></div>
-          <div class="field"><label>Exit Price</label><input type="number" step="0.00000001" name="exit_price" /></div>
-          <div class="field"><label>Exit Fees</label><input type="number" step="0.01" name="exit_fees" value="0" /></div>
-        </div>
-        <div class="field" style="margin-top:14px"><label>Notes</label><textarea name="notes" placeholder="Short thesis, mistake flags, or context"></textarea></div>
+      <form id="log-trade" class="form-layout" method="post" action="/trades/new">
+        <section class="card">
+          <div class="form-section">
+            <h3>What did you trade</h3>
+            <div class="form-row">
+              <div class="field"><label for="f-inst">Instrument</label><select id="f-inst" name="instrument_id" required>{instrument_options}</select></div>
+              <div class="field"><label for="f-acct">Account</label><select id="f-acct" name="account_id" required>{account_options}</select></div>
+            </div>
+            <div class="field" style="margin-top:12px"><label>Side</label>
+              <div class="seg" role="radiogroup" aria-label="Side">
+                <input class="long" type="radio" id="f-long" name="direction" value="LONG" checked /><label for="f-long">▲ Long</label>
+                <input class="short" type="radio" id="f-short" name="direction" value="SHORT" /><label for="f-short">▼ Short</label>
+              </div>
+            </div>
+          </div>
+          <div class="form-section">
+            <h3>Plan</h3>
+            <div class="form-row">
+              <div class="field"><label for="f-entry">Entry</label><input id="f-entry" name="entry_price" {decimal_input} required /></div>
+              <div class="field"><label for="f-stop">Stop</label><input id="f-stop" name="planned_stop" {decimal_input} /></div>
+              <div class="field"><label for="f-target">Target</label><input id="f-target" name="planned_target" {decimal_input} /></div>
+              <div class="field"><label for="f-qty">Size</label><input id="f-qty" name="quantity" {decimal_input} min="0" required /></div>
+            </div>
+            <div class="form-row" style="margin-top:12px">
+              <div class="field"><label for="f-opened">Opened</label><input id="f-opened" type="datetime-local" name="opened_at" required /></div>
+              <div class="field"><label for="f-efee">Entry fees</label><input id="f-efee" name="entry_fees" {decimal_input} value="0" /></div>
+            </div>
+          </div>
+          <div class="form-section">
+            <h3>Outcome <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">— leave blank if still open</span></h3>
+            <div class="form-row">
+              <div class="field"><label for="f-exit">Exit</label><input id="f-exit" name="exit_price" {decimal_input} /></div>
+              <div class="field"><label for="f-closed">Closed</label><input id="f-closed" type="datetime-local" name="closed_at" /></div>
+              <div class="field"><label for="f-xfee">Exit fees</label><input id="f-xfee" name="exit_fees" {decimal_input} value="0" /></div>
+            </div>
+          </div>
+          <div class="form-section">
+            <h3>Context</h3>
+            <div class="form-row">
+              <div class="field"><label for="f-setup">Setup</label><input id="f-setup" name="setup_tag" list="setup-tags" placeholder="ORB" /><datalist id="setup-tags">{setup_list}</datalist></div>
+              <div class="field"><label for="f-tf">Timeframe</label><select id="f-tf" name="timeframe">{timeframes}</select></div>
+            </div>
+            <div class="field" style="margin-top:12px"><label for="f-notes">Notes</label><textarea id="f-notes" name="notes" placeholder="Thesis, execution, what you'd do differently"></textarea></div>
+          </div>
+        </section>
+        <aside class="card preview" aria-live="polite">
+          <div class="label">Planned reward : risk</div>
+          <div id="pv-rr" class="big">—</div>
+          <dl>
+            <dt>Risk</dt><dd id="pv-risk">—</dd>
+            <dt>Risk of account</dt><dd id="pv-risk-pct">—</dd>
+            <dt>Potential reward</dt><dd id="pv-reward">—</dd>
+            <dt>Net P&amp;L</dt><dd id="pv-pnl">—</dd>
+            <dt>Result</dt><dd id="pv-r">—</dd>
+          </dl>
+          <p id="pv-warn" class="hint warn" hidden></p>
+          <p id="pv-status" class="hint">Saved as open position</p>
+          <button class="btn btn-primary" type="submit" style="width:100%;margin-top:14px">Save trade</button>
+        </aside>
       </form>
+      <script>{LOG_TRADE_SCRIPT}</script>
     """
-    user = data["user"]
-    return shell("New Trade", "trades", body, "Manual Entry", user.name or user.email)
+    return shell("Log trade", "trades", body, "Manual entry", user.name or user.email)
+
+
+def form_decimal(value: str) -> Decimal | None:
+    try:
+        return Decimal(value.strip()) if value and value.strip() else None
+    except ArithmeticError:
+        raise HTTPException(status_code=400, detail=f"Invalid number: {value!r}") from None
+
+
+def form_datetime(value: str) -> datetime | None:
+    if not value or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid date: {value!r}") from None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
 @app.post("/trades/new")
@@ -514,20 +623,39 @@ def create_trade_from_form(
     account_id: str = Form(...),
     instrument_id: str = Form(...),
     direction: Direction = Form(...),
-    trade_status: TradeStatus = Form(...),
-    opened_at: datetime = Form(...),
-    entry_price: Decimal = Form(...),
-    quantity: Decimal = Form(...),
+    opened_at: str = Form(...),
+    entry_price: str = Form(...),
+    quantity: str = Form(...),
+    trade_status: TradeStatus | None = Form(default=None),
     setup_tag: str = Form(""),
     timeframe: str = Form(""),
-    planned_stop: Decimal | None = Form(default=None),
-    planned_target: Decimal | None = Form(default=None),
-    entry_fees: Decimal = Form(default=Decimal("0")),
-    closed_at: datetime | None = Form(default=None),
-    exit_price: Decimal | None = Form(default=None),
-    exit_fees: Decimal = Form(default=Decimal("0")),
+    planned_stop: str = Form(""),
+    planned_target: str = Form(""),
+    entry_fees: str = Form("0"),
+    closed_at: str = Form(""),
+    exit_price: str = Form(""),
+    exit_fees: str = Form("0"),
     notes: str = Form(""),
 ) -> RedirectResponse:
+    entry = form_decimal(entry_price)
+    size = form_decimal(quantity)
+    if entry is None or size is None or size <= 0:
+        raise HTTPException(status_code=400, detail="Entry price and a positive size are required")
+    stop = form_decimal(planned_stop)
+    target = form_decimal(planned_target)
+    exit_value = form_decimal(exit_price)
+    opened = form_datetime(opened_at)
+    if opened is None:
+        raise HTTPException(status_code=400, detail="Opened time is required")
+    closed = form_datetime(closed_at)
+    # An exit price means the trade is closed, unless the caller explicitly says otherwise.
+    resolved_status = trade_status or (TradeStatus.CLOSED if exit_value is not None else TradeStatus.OPEN)
+    if resolved_status == TradeStatus.CLOSED:
+        if exit_value is None:
+            raise HTTPException(status_code=400, detail="A closed trade needs an exit price")
+        closed = closed or datetime.now(UTC)
+        if closed < opened:
+            raise HTTPException(status_code=400, detail="Closed time is before opened time")
     session = SessionLocal()
     try:
         user = first_user(session)
@@ -537,22 +665,20 @@ def create_trade_from_form(
         instrument = session.get(Instrument, instrument_id)
         if account is None or instrument is None:
             raise HTTPException(status_code=400, detail="Invalid account or instrument")
-        normalized_closed_at = closed_at.replace(tzinfo=UTC) if closed_at and closed_at.tzinfo is None else closed_at
-        normalized_opened_at = opened_at.replace(tzinfo=UTC) if opened_at.tzinfo is None else opened_at
         trade = Trade(
             account_id=account.id,
             user_id=user.id,
             instrument_id=instrument.id,
             direction=direction,
-            status=trade_status,
-            opened_at=normalized_opened_at,
-            closed_at=normalized_closed_at if trade_status == TradeStatus.CLOSED else None,
-            setup_tag=setup_tag or None,
+            status=resolved_status,
+            opened_at=opened,
+            closed_at=closed if resolved_status == TradeStatus.CLOSED else None,
+            setup_tag=setup_tag.strip() or None,
             timeframe=timeframe or None,
-            planned_entry=entry_price,
-            planned_stop=planned_stop,
-            planned_target=planned_target,
-            planned_rr=compute_planned_rr(direction, entry_price, planned_stop, planned_target),
+            planned_entry=entry,
+            planned_stop=stop,
+            planned_target=target,
+            planned_rr=compute_planned_rr(direction, entry, stop, target),
             commissions=Decimal("0"),
             notes=notes or None,
             mistake_flags=[],
@@ -560,23 +686,11 @@ def create_trade_from_form(
             is_reviewed=False,
         )
         trade.executions = [
-            Execution(
-                type=ExecutionType.ENTRY,
-                executed_at=normalized_opened_at,
-                price=entry_price,
-                quantity=quantity,
-                fees=entry_fees,
-            )
+            Execution(type=ExecutionType.ENTRY, executed_at=opened, price=entry, quantity=size, fees=form_decimal(entry_fees) or Decimal("0"))
         ]
-        if trade_status == TradeStatus.CLOSED and normalized_closed_at is not None and exit_price is not None:
+        if resolved_status == TradeStatus.CLOSED and exit_value is not None and closed is not None:
             trade.executions.append(
-                Execution(
-                    type=ExecutionType.EXIT,
-                    executed_at=normalized_closed_at,
-                    price=exit_price,
-                    quantity=quantity,
-                    fees=exit_fees,
-                )
+                Execution(type=ExecutionType.EXIT, executed_at=closed, price=exit_value, quantity=size, fees=form_decimal(exit_fees) or Decimal("0"))
             )
         session.add(trade)
         session.flush()
@@ -608,42 +722,83 @@ def trade_detail(trade_id: str) -> str:
     try:
         user = first_user(session)
         if user is None:
-            return shell("Trade Detail", "trades", '<section class="empty" style="margin-top:18px">No users found.</section>')
+            return no_user_page("Trade", "trades")
         trade = session.scalar(
             select(Trade)
             .options(selectinload(Trade.metrics), selectinload(Trade.instrument), selectinload(Trade.account), selectinload(Trade.executions))
             .where(Trade.id == trade_id, Trade.user_id == user.id)
         )
         if trade is None:
-            return shell("Trade Detail", "trades", '<section class="empty" style="margin-top:18px">Trade not found.</section>', "Trade", user.name or user.email)
-        execution_rows = "".join(
-            f"""<tr><td>{escape(row.type.value)}</td><td>{escape(row.executed_at.strftime("%Y-%m-%d %H:%M"))}</td><td>{money(row.price)}</td><td>{number(row.quantity)}</td><td>{money(row.fees)}</td></tr>"""
-            for row in trade.executions
-        )
+            return shell("Trade", "trades", empty_state("Trade not found", "It may have been deleted.", "/trades", "Back to trades"), "Trade", user.name or user.email)
+        journals = session.scalars(
+            select(JournalEntry)
+            .where(JournalEntry.user_id == user.id, (JournalEntry.trade_id == trade.id) | (JournalEntry.id == trade.journal_entry_id))
+            .order_by(JournalEntry.date.desc())
+        ).all()
+        attachments = session.scalars(select(Attachment).where(Attachment.trade_id == trade.id).order_by(Attachment.created_at)).all()
+        today = today_utc()
         metrics = trade.metrics
+        closed = metrics is not None and metrics.average_exit is not None
+        net = metrics.realized_pnl if metrics else Decimal("0")
+        r_value = metrics.r_multiple if metrics else None
+        size = metrics.total_quantity if metrics else Decimal("0")
+        entry = metrics.average_entry if metrics and metrics.average_entry else trade.planned_entry
+        point_value = trade.instrument.point_value or Decimal("1")
+        planned_risk = abs(entry - trade.planned_stop) * size * point_value if entry is not None and trade.planned_stop is not None else None
+        tid = escape(trade.id)
+        meta = " · ".join(
+            escape(part) for part in (trade.account.name, trade.setup_tag or "No setup", trade.timeframe or "", short_datetime(trade.opened_at, today)) if part
+        )
+        journal_items = "".join(
+            f'<li><a href="/journal/{escape(entry_row.id)}">{escape(entry_row.title)}</a> <span class="muted small">{escape(entry_row.date.isoformat())}</span></li>'
+            for entry_row in journals
+        )
+        thumbs = "".join(
+            f'<a href="{escape(row.url)}" target="_blank" rel="noopener"><img src="{escape(row.url)}" alt="{escape(row.file_name)}" loading="lazy" /></a>'
+            for row in attachments
+        )
+        flags = "".join(f'<span class="badge badge-review">{escape(flag)}</span> ' for flag in trade.mistake_flags or [])
         body = f"""
-          <section class="grid kpis">
-            {kpi_card("Symbol", trade.instrument.symbol, "neutral", trade.instrument.asset_class.value)}
-            {kpi_card("Net P&L", money(metrics.realized_pnl if metrics else 0), tone(metrics.realized_pnl if metrics else 0), "Realized")}
-            {kpi_card("R Multiple", number(metrics.r_multiple if metrics else 0, "R"), tone(metrics.r_multiple if metrics and metrics.r_multiple else 0), "Risk normalized")}
-            {kpi_card("Quantity", number(metrics.total_quantity if metrics else 0), "neutral", "Total entry size")}
-            {kpi_card("Average Entry", money(metrics.average_entry if metrics else trade.planned_entry), "neutral", "Weighted")}
-            {kpi_card("Average Exit", money(metrics.average_exit if metrics else None), "neutral", "Weighted")}
+          <div class="trade-head">
+            <span class="sym">{escape(trade.instrument.symbol)}</span>
+            {side_badge(trade.direction.value)} {status_badge(trade.status.value)}
+            <span class="meta">{meta}</span>
+            <div class="actions">
+              <a class="btn" href="/trades/{tid}/journal">Write review</a>
+              <form method="post" action="/trades/{tid}/share" style="margin:0"><button class="btn" type="submit">Share</button></form>
+            </div>
+          </div>
+          <section class="kpi-row">
+            {kpi("Net P&L", money(net, signed=True) if closed else "Open", tone(net) if closed else "", f"{number(metrics.pnl_percent, '%')} on capital" if closed and metrics.pnl_percent is not None else "Unrealised")}
+            {kpi("Result", number(r_value, "R") if closed and r_value is not None else "—", tone(r_value) if closed else "", f"Risked {money(planned_risk)}" if planned_risk is not None else "No stop set")}
+            {kpi("Planned R:R", number(trade.planned_rr, "R") if trade.planned_rr is not None else "—", "", "Target vs stop")}
+            {kpi("Hold time", hold_time(metrics.holding_period_seconds if metrics else None), "", "Entry to exit")}
+            {kpi("Size", number(size).rstrip("0").rstrip("."), "", f"Point value {number(point_value).rstrip('0').rstrip('.')}")}
           </section>
-          <section class="grid two-col">
+          <section class="dash-grid">
             <div class="card">
-              <div class="section-head"><div><div class="label">Trade Plan</div><h2 style="margin:4px 0 0">{escape(trade.setup_tag or "Unassigned Setup")}</h2></div><span class="badge">{escape(trade.status.value)}</span></div>
-              <p class="muted">Account: {escape(trade.account.name)} · Direction: {escape(trade.direction.value)} · Timeframe: {escape(trade.timeframe or "N/A")}</p>
-              <p>{escape(trade.notes or "No notes recorded.")}</p>
-              <div class="actions"><a class="pill primary" href="/trades/{escape(trade.id)}/journal">Open Trade Journal</a></div>
+              <div class="card-title"><h2>Price ladder</h2><span class="meta">Plan vs actual</span></div>
+              {price_ladder(trade.direction, entry, trade.planned_stop, trade.planned_target, metrics.average_exit if metrics else None)}
             </div>
             <div class="card">
-              <div class="section-head"><div><div class="label">Execution Breakdown</div><h2 style="margin:4px 0 0">Orders</h2></div></div>
-              <table><thead><tr><th>Type</th><th>Time</th><th>Price</th><th>Qty</th><th>Fees</th></tr></thead><tbody>{execution_rows}</tbody></table>
+              <div class="card-title"><h2>Executions</h2><span class="meta">{len(trade.executions)} fills</span></div>
+              {execution_timeline(trade.executions, today)}
+            </div>
+          </section>
+          <section class="dash-grid">
+            <div class="card">
+              <div class="card-title"><h2>Notes</h2></div>
+              <p style="white-space:pre-wrap;margin:0">{escape(trade.notes or "No notes yet.")}</p>
+              {f'<div style="margin-top:12px">{flags}</div>' if flags else ""}
+            </div>
+            <div class="card">
+              <div class="card-title"><h2>Journal and screenshots</h2><a class="btn btn-sm" href="/settings/uploads">Upload</a></div>
+              {f'<ul style="margin:0 0 12px;padding-left:18px">{journal_items}</ul>' if journal_items else f'<p class="muted">No review yet. <a href="/trades/{tid}/journal">Write one</a> while it is fresh.</p>'}
+              {f'<div class="thumbs">{thumbs}</div>' if thumbs else ""}
             </div>
           </section>
         """
-        return shell(f"{trade.instrument.symbol} Trade", "trades", body, trade.account.name, user.name or user.email)
+        return shell(f"{trade.instrument.symbol} {trade.direction.value.lower()}", "trades", body, trade.account.name, user.name or user.email)
     finally:
         session.close()
 
@@ -785,7 +940,7 @@ def plain_text_from_tiptap(content: dict[str, object]) -> str:
 
 
 @app.get("/journal", response_class=HTMLResponse)
-def journal_feed(entry_type: str | None = Query(default=None)) -> str:
+def journal_feed(entry_type: str | None = Query(default=None), day: date | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
         user = first_user(session)
@@ -794,7 +949,28 @@ def journal_feed(entry_type: str | None = Query(default=None)) -> str:
         query = select(JournalEntry).where(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc(), JournalEntry.created_at.desc())
         if entry_type:
             query = query.where(JournalEntry.type == JournalType(entry_type))
+        if day:
+            query = query.where(JournalEntry.date == day)
         entries = session.scalars(query.limit(100)).all()
+        day_panel = ""
+        if day:
+            day_trades = [
+                trade for trade in session.scalars(
+                    select(Trade)
+                    .options(selectinload(Trade.metrics), selectinload(Trade.instrument), selectinload(Trade.account))
+                    .where(Trade.user_id == user.id)
+                    .order_by(Trade.opened_at)
+                ).all()
+                if trade.opened_at.date() == day or book.closed_day(trade) == day
+            ]
+            day_net = sum((book.pnl(trade) for trade in day_trades if book.closed_day(trade) == day), Decimal("0"))
+            day_panel = f"""<section class="card" style="margin-top:16px">
+              <div class="card-title"><h2>{day.strftime("%A, %B")} {day.day}</h2>
+                <span class="meta">Closed P&amp;L <b class="{tone(day_net)}">{money(day_net, signed=True)}</b></span></div>
+              {trade_table(day_trades, today_utc(), empty='<p class="muted">No trades on this day.</p>')}
+              <div class="actions" style="margin-top:12px"><a class="btn btn-primary" href="/journal/new?entry_type=DAILY&amp;entry_date={day.isoformat()}">Write daily journal</a>
+              <a class="btn" href="/journal">All entries</a></div>
+            </section>"""
         filters = "".join(
             f'<a class="pill {"primary" if entry_type == item.value else ""}" href="/journal?entry_type={item.value}">{item.value.replace("_", " ").title()}</a>'
             for item in JournalType
@@ -815,6 +991,7 @@ def journal_feed(entry_type: str | None = Query(default=None)) -> str:
         if not rows:
             rows = '<section class="empty">No journal entries match this filter.</section>'
         body = f"""
+          {day_panel}
           <div class="actions" style="margin-top:16px"><a class="pill primary" href="/journal/new">New Journal</a><a class="pill" href="/journal">All</a>{filters}</div>
           <section class="grid" style="margin-top:16px">{rows}</section>
         """
@@ -826,7 +1003,11 @@ def journal_feed(entry_type: str | None = Query(default=None)) -> str:
 
 
 @app.get("/journal/new", response_class=HTMLResponse)
-def new_journal(trade_id: str | None = Query(default=None), entry_type: str = Query(default="DAILY")) -> str:
+def new_journal(
+    trade_id: str | None = Query(default=None),
+    entry_type: str = Query(default="DAILY"),
+    entry_date: date | None = Query(default=None),
+) -> str:
     session = SessionLocal()
     try:
         user = first_user(session)
@@ -854,7 +1035,7 @@ def new_journal(trade_id: str | None = Query(default=None), entry_type: str = Qu
             <div class="section-head"><div><div class="label">Structured Reflection</div><h2 style="margin:4px 0 0">New Journal Entry</h2></div><button class="primary" type="submit">Save Journal</button></div>
             <div class="form-grid">
               <div class="field"><label>Type</label><select name="entry_type">{type_options}</select></div>
-              <div class="field"><label>Date</label><input type="date" name="entry_date" value="{date.today().isoformat()}" required /></div>
+              <div class="field"><label>Date</label><input type="date" name="entry_date" value="{(entry_date or date.today()).isoformat()}" required /></div>
               <div class="field"><label>Title</label><input name="title" value="{escape(title)}" required /></div>
               <div class="field"><label>Mood</label><select name="mood"><option value="">N/A</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
               <div class="field"><label>Market Condition</label><select name="market_condition">{condition_options}</select></div>
@@ -955,208 +1136,215 @@ def journal_detail(journal_id: str) -> str:
         session.close()
 
 
-def analytics_nav(active: str) -> str:
-    items = [
-        ("Overview", "/analytics", "overview"),
-        ("Instruments", "/analytics/instruments", "instruments"),
-        ("Setups", "/analytics/setups", "setups"),
-        ("Time", "/analytics/time", "time"),
-        ("Risk", "/analytics/risk", "risk"),
-        ("Streaks", "/analytics/streaks", "streaks"),
+ANALYTICS_TABS = (
+    ("Overview", "/analytics", "overview"),
+    ("Instruments", "/analytics/instruments", "instruments"),
+    ("Setups", "/analytics/setups", "setups"),
+    ("Time", "/analytics/time", "time"),
+    ("Risk", "/analytics/risk", "risk"),
+    ("Streaks", "/analytics/streaks", "streaks"),
+)
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def analytics_nav(active: str, qs: str = "") -> str:
+    return f'<div class="page-block">{filter_tabs([(label, href + qs, key == active) for label, href, key in ANALYTICS_TABS])}</div>'
+
+
+def group_rows(groups: list[book.Group]) -> list[dict[str, object]]:
+    return [
+        {
+            "key": group.key,
+            "trades": group.stats.trades,
+            "netPnl": group.stats.net_pnl,
+            "winRate": group.stats.win_rate,
+            "profitFactor": group.stats.profit_factor or Decimal("0"),
+            "averageR": group.stats.expectancy_r or Decimal("0"),
+        }
+        for group in groups
     ]
-    return f'<div class="page-block">{filter_tabs([(label, href, key == active) for label, href, key in items])}</div>'
 
 
 def performance_table(rows: list[dict[str, object]], label: str) -> str:
     body = "".join(
         f"""<tr>
           <td>{escape(str(row["key"]))}</td>
-          <td>{row["trades"]}</td>
-          <td class="{tone(row["netPnl"])}">{money(row["netPnl"])}</td>
-          <td>{number(row["winRate"], "%")}</td>
-          <td>{number(row["profitFactor"])}</td>
-          <td class="{tone(row["averageR"])}">{number(row["averageR"], "R")}</td>
+          <td class="num">{row["trades"]}</td>
+          <td class="num {tone(row["netPnl"])}">{money(row["netPnl"], signed=True)}</td>
+          <td class="num">{number(row["winRate"], "%")}</td>
+          <td class="num">{number(row["profitFactor"])}</td>
+          <td class="num {tone(row["averageR"])}">{number(row["averageR"], "R")}</td>
         </tr>"""
         for row in rows
-    ) or '<tr><td colspan="6" class="muted">No analytics data yet.</td></tr>'
+    ) or '<tr><td colspan="6" class="muted">No closed trades in this range.</td></tr>'
     return f"""
-      <section class="card" style="margin-top:16px">
-        <div class="section-head"><div><div class="label">Performance By</div><h2 style="margin:4px 0 0">{escape(label)}</h2></div></div>
-        <table><thead><tr><th>Group</th><th>Trades</th><th>Net P&L</th><th>Win Rate</th><th>Profit Factor</th><th>Avg R</th></tr></thead><tbody>{body}</tbody></table>
+      <section class="card" style="margin-top:14px">
+        <div class="card-title"><h2>By {escape(label.lower())}</h2><span class="meta">Ranked by expectancy</span></div>
+        <div class="table-wrap"><table class="dense"><thead><tr><th>{escape(label)}</th><th class="num">Trades</th><th class="num">Net P&amp;L</th><th class="num">Win rate</th><th class="num">Profit factor</th><th class="num">Expectancy</th></tr></thead><tbody>{body}</tbody></table></div>
       </section>
     """
 
 
-def daily_bars(rows: list[DailyStats]) -> str:
+def daily_bars(daily: dict[date, Decimal]) -> str:
+    rows = list(daily.items())[-30:]
     if not rows:
-        return '<div class="empty">Daily P&L bars will appear after trades are closed.</div>'
-    max_abs = max(abs(row.net_pnl) for row in rows) or Decimal("1")
-    bars = "".join(
-        f"""<div title="{row.date.isoformat()} {money(row.net_pnl)}" style="display:flex;align-items:center;gap:8px;margin:8px 0">
-          <span class="small muted" style="width:76px">{row.date.strftime("%m-%d")}</span>
-          <div class="bar" style="flex:1"><span style="width:{abs(row.net_pnl) / max_abs * Decimal("100")}%;background:var(--green)" class="{"positive" if row.net_pnl >= 0 else "negative"}"></span></div>
-          <span class="small {tone(row.net_pnl)}" style="width:90px;text-align:right">{money(row.net_pnl)}</span>
+        return '<p class="muted">Daily P&amp;L bars appear once trades in this range are closed.</p>'
+    max_abs = max(abs(value) for _, value in rows) or Decimal("1")
+    return "".join(
+        f"""<div class="daily-row" title="{day.isoformat()} {money(value, signed=True)}" style="margin:6px 0">
+          <span class="small muted">{day.strftime("%b %d")}</span>
+          <div class="bar-wrap"><div class="bar-fill {"pos" if value >= 0 else "neg"}" style="width:{abs(value) / max_abs * 100:.1f}%"></div></div>
+          <span class="small num {tone(value)}" style="text-align:right">{money(value, signed=True)}</span>
         </div>"""
-        for row in rows[-30:]
+        for day, value in rows
     )
-    return bars
 
 
 def heatmap(rows: list[dict[str, object]]) -> str:
     if not rows:
-        return '<div class="empty">Heat map data will appear after enough trades are logged.</div>'
+        return '<p class="muted">Heat map data appears once trades in this range are closed.</p>'
     max_abs = max(abs(Decimal(row["netPnl"])) for row in rows) or Decimal("1")
     cells = ""
     for row in rows:
         net_pnl = Decimal(row["netPnl"])
-        alpha = max(Decimal("0.12"), abs(net_pnl) / max_abs * Decimal("0.55"))
-        rgb = "0,217,126" if net_pnl >= 0 else "255,69,96"
-        cells += f"""<div class="card" style="padding:12px;background:rgba({rgb},{alpha})">
+        strength = max(Decimal("0.15"), abs(net_pnl) / max_abs) * 100
+        color = "var(--success)" if net_pnl >= 0 else "var(--danger)"
+        cells += f"""<div class="card" style="padding:12px;background:color-mix(in srgb,{color} {strength * Decimal('0.35'):.0f}%,var(--bg-surface))">
           <div class="label">{escape(str(row["key"]))}</div>
-          <div class="{tone(net_pnl)}" style="font-family:ui-monospace,Menlo,monospace">{money(net_pnl)}</div>
+          <div class="num {tone(net_pnl)}" style="font-weight:700">{money(net_pnl, signed=True)}</div>
           <div class="muted small">{row["trades"]} trades · {number(row["winRate"], "%")} win</div>
         </div>"""
     return f'<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px">{cells}</div>'
 
 
-def analytics_data() -> dict[str, object]:
+def analytics_page(
+    title: str,
+    active: str,
+    account_id: str | None,
+    range_code: str | None,
+    render,
+) -> str:
+    """Load the filtered book once and hand the closed trades in range to ``render``."""
     session = SessionLocal()
     try:
         user = first_user(session)
         if user is None:
-            return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
-        accounts = session.scalars(select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None))).all()
-        daily = session.scalars(
-            select(DailyStats)
-            .where(DailyStats.account_id.in_([account.id for account in accounts]))
-            .order_by(DailyStats.date.asc())
-        ).all() if accounts else []
-        snapshots = session.scalars(
-            select(AccountSnapshot)
-            .where(AccountSnapshot.account_id.in_([account.id for account in accounts]))
-            .order_by(AccountSnapshot.date.asc())
-        ).all() if accounts else []
-        return {
-            "user": user,
-            "summary": summary(session, user.id),
-            "setups": grouped_performance(session, user.id, "setup"),
-            "instruments": grouped_performance(session, user.id, "instrument"),
-            "weekday": grouped_performance(session, user.id, "weekday"),
-            "hour": grouped_performance(session, user.id, "hour"),
-            "streaks": streaks(session, user.id),
-            "daily": daily,
-            "snapshots": snapshots,
-        }
+            return no_user_page(title, "analytics")
+        today = today_utc()
+        period = book.resolve_period(range_code, today)
+        accounts, selected, trades = load_book(session, user, account_id)
+        current = closed_in(trades, period)
+        scope_accounts = [selected] if selected else accounts
+        opening = opening_balance(scope_accounts, trades, period)
+        curve = book.equity_curve(opening, current)
+        account_param = selected.id if selected else None
+        qs = query_string({"account_id": account_param, "range": period.code})
+        body = (
+            filter_bar(f"/analytics/{active}" if active != "overview" else "/analytics", accounts, account_param, period)
+            + analytics_nav(active, qs)
+            + render(current, curve, selected, opening)
+        )
+        return shell(title, "analytics", body, selected.name if selected else "All accounts", user.name or user.email)
     except SQLAlchemyError as exc:
-        return {"error": str(exc)}
+        logger.exception("analytics failed")
+        return shell(title, "analytics", empty_state("Analytics unavailable", type(exc).__name__))
     finally:
         session.close()
 
 
+def by_setup(trade: Trade) -> str:
+    return trade.setup_tag or "Untagged"
+
+
+def by_symbol(trade: Trade) -> str:
+    return trade.instrument.symbol
+
+
 @app.get("/analytics", response_class=HTMLResponse)
 @app.get("/analytics/overview", response_class=HTMLResponse)
-def analytics_overview() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    metrics = data["summary"]
-    body = f"""
-      {analytics_nav("overview")}
-      <section class="grid kpis">
-        {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "All accounts")}
-        {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
-        {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "Book quality")}
-        {kpi_card("Average R", number(metrics["average_r"], "R"), tone(metrics["average_r"]), "Risk normalized")}
-        {kpi_card("Trades", str(metrics["trades_count"]), "neutral", "Sample size")}
-        {kpi_card("Avg Hold", number(Decimal(metrics["average_hold_seconds"]) / Decimal("3600"), "h"), "neutral", "Closed trades")}
-      </section>
-      <section class="grid two-col">
-        <div class="card"><div class="section-head"><div><div class="label">Equity</div><h2 style="margin:4px 0 0">Combined Curve</h2></div></div>{sparkline([row.balance for row in data["snapshots"]])}</div>
-        <div class="card"><div class="section-head"><div><div class="label">Daily P&L</div><h2 style="margin:4px 0 0">Last 30 Sessions</h2></div></div>{daily_bars(data["daily"])}</div>
-      </section>
-      {performance_table(data["setups"][:8], "Setup Tag")}
-    """
-    user = data["user"]
-    return shell("Analytics", "analytics", body, "Analytics", user.name or user.email)
+def analytics_overview(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
+        return f"""
+          {kpi_strip(book.stats(current), None, book.max_drawdown_pct(curve), drawdown_note(selected))}
+          <section class="dash-grid">
+            <div class="card"><div class="card-title"><h2>Equity curve</h2></div>{equity_chart(curve, opening)}</div>
+            <div class="card"><div class="card-title"><h2>Edge by setup</h2></div>{edge_bars(book.by_expectancy(book.group_by(current, by_setup)))}</div>
+          </section>
+          {performance_table(group_rows(book.by_expectancy(book.group_by(current, by_symbol))), "Instrument")}
+        """
+
+    return analytics_page("Analytics", "overview", account_id, range_code, render)
 
 
 @app.get("/analytics/instruments", response_class=HTMLResponse)
-def analytics_instruments() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    user = data["user"]
-    return shell("By Instrument", "analytics", analytics_nav("instruments") + performance_table(data["instruments"], "Instrument"), "Analytics", user.name or user.email)
+def analytics_instruments(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    return analytics_page(
+        "By instrument", "instruments", account_id, range_code,
+        lambda current, curve, selected, opening: performance_table(group_rows(book.by_expectancy(book.group_by(current, by_symbol))), "Instrument"),
+    )
 
 
 @app.get("/analytics/setups", response_class=HTMLResponse)
-def analytics_setups() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    user = data["user"]
-    return shell("By Setup", "analytics", analytics_nav("setups") + performance_table(data["setups"], "Setup Tag"), "Analytics", user.name or user.email)
+def analytics_setups(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
+        groups = book.by_expectancy(book.group_by(current, by_setup))
+        return f'<section class="card"><div class="card-title"><h2>Edge by setup</h2></div>{edge_bars(groups, limit=20)}</section>' + performance_table(group_rows(groups), "Setup")
+
+    return analytics_page("By setup", "setups", account_id, range_code, render)
 
 
 @app.get("/analytics/time", response_class=HTMLResponse)
-def analytics_time() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    body = f"""
-      {analytics_nav("time")}
-      <section class="grid two-col">
-        <div class="card"><div class="section-head"><div><div class="label">Day of Week</div><h2 style="margin:4px 0 0">Session Heat Map</h2></div></div>{heatmap(data["weekday"])}</div>
-        <div class="card"><div class="section-head"><div><div class="label">Hour of Day</div><h2 style="margin:4px 0 0">Timing Edge</h2></div></div>{heatmap(data["hour"])}</div>
-      </section>
-    """
-    user = data["user"]
-    return shell("By Time", "analytics", body, "Analytics", user.name or user.email)
+def analytics_time(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
+        weekday = sorted(book.group_by(current, lambda trade: trade.opened_at.strftime("%A")), key=lambda group: WEEKDAYS.index(group.key))
+        hour = sorted(book.group_by(current, lambda trade: f"{trade.opened_at.hour:02d}:00"), key=lambda group: group.key)
+        return f"""
+          <section class="grid two-col">
+            <div class="card"><div class="card-title"><h2>Day of week</h2></div>{heatmap(group_rows(weekday))}</div>
+            <div class="card"><div class="card-title"><h2>Hour of day</h2><span class="meta">UTC</span></div>{heatmap(group_rows(hour))}</div>
+          </section>
+        """
+
+    return analytics_page("By time", "time", account_id, range_code, render)
 
 
 @app.get("/analytics/risk", response_class=HTMLResponse)
-def analytics_risk() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    snapshots = data["snapshots"]
-    max_drawdown = min((row.drawdown_pct for row in snapshots), default=Decimal("0"))
-    worst_day = min((row.net_pnl for row in data["daily"]), default=Decimal("0"))
-    best_day = max((row.net_pnl for row in data["daily"]), default=Decimal("0"))
-    body = f"""
-      {analytics_nav("risk")}
-      <section class="grid kpis">
-        {kpi_card("Max Drawdown", number(max_drawdown, "%"), "negative" if max_drawdown < 0 else "neutral", "Underwater")}
-        {kpi_card("Worst Day", money(worst_day), tone(worst_day), "Daily stats")}
-        {kpi_card("Best Day", money(best_day), tone(best_day), "Daily stats")}
-        {kpi_card("Tracked Days", str(len(data["daily"])), "neutral", "Computed")}
-      </section>
-      <section class="grid two-col">
-        <div class="card"><div class="section-head"><div><div class="label">Drawdown</div><h2 style="margin:4px 0 0">Equity Underwater</h2></div></div>{sparkline([row.drawdown_pct for row in snapshots])}</div>
-        <div class="card"><div class="section-head"><div><div class="label">Distribution</div><h2 style="margin:4px 0 0">Daily P&L</h2></div></div>{daily_bars(data["daily"])}</div>
-      </section>
-    """
-    user = data["user"]
-    return shell("Risk Analytics", "analytics", body, "Analytics", user.name or user.email)
+def analytics_risk(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
+        daily = book.daily_pnl(current)
+        stats = book.stats(current)
+        return f"""
+          <section class="kpi-row">
+            {kpi("Max drawdown", number(book.max_drawdown_pct(curve), "%"), "negative" if book.max_drawdown_pct(curve) < 0 else "", drawdown_note(selected))}
+            {kpi("Worst day", money(min(daily.values(), default=Decimal("0")), signed=True), "negative", f"{len([v for v in daily.values() if v < 0])} red days")}
+            {kpi("Best day", money(max(daily.values(), default=Decimal("0")), signed=True), "positive", f"{len([v for v in daily.values() if v > 0])} green days")}
+            {kpi("Worst trade", money(stats.worst_trade, signed=True), tone(stats.worst_trade), "Single trade")}
+            {kpi("Best trade", money(stats.best_trade, signed=True), tone(stats.best_trade), "Single trade")}
+          </section>
+          <section class="dash-grid">
+            <div class="card"><div class="card-title"><h2>Equity and drawdown</h2></div>{equity_chart(curve, opening)}</div>
+            <div class="card"><div class="card-title"><h2>Daily P&amp;L</h2><span class="meta">Last 30 sessions</span></div>{daily_bars(daily)}</div>
+          </section>
+        """
+
+    return analytics_page("Risk", "risk", account_id, range_code, render)
 
 
 @app.get("/analytics/streaks", response_class=HTMLResponse)
-def analytics_streaks() -> str:
-    data = analytics_data()
-    if "error" in data:
-        return shell("Analytics", "analytics", f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>')
-    streak_data = data["streaks"]
-    body = f"""
-      {analytics_nav("streaks")}
-      <section class="grid kpis">
-        {kpi_card("Longest Win Streak", str(streak_data["longestWinStreak"]), "positive", "Closed trades")}
-        {kpi_card("Longest Loss Streak", str(streak_data["longestLossStreak"]), "negative", "Closed trades")}
-        {kpi_card("Current Streak", str(streak_data["currentStreak"]), "neutral", str(streak_data["currentKind"]).title())}
-      </section>
-      {performance_table(data["setups"][:10], "Setup Stability")}
-    """
-    user = data["user"]
-    return shell("Streaks", "analytics", body, "Analytics", user.name or user.email)
+def analytics_streaks(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
+    def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
+        streak = book.streaks(current)
+        current_tone = "positive" if streak["currentKind"] == "win" else "negative" if streak["currentKind"] == "loss" else ""
+        return f"""
+          <section class="kpi-row" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+            {kpi("Longest win streak", str(streak["longestWinStreak"]), "positive", "Consecutive winners")}
+            {kpi("Longest loss streak", str(streak["longestLossStreak"]), "negative", "Consecutive losers")}
+            {kpi("Current streak", str(streak["currentStreak"]), current_tone, str(streak["currentKind"]).title())}
+          </section>
+          {performance_table(group_rows(book.by_expectancy(book.group_by(current, by_setup))), "Setup")}
+        """
+
+    return analytics_page("Streaks", "streaks", account_id, range_code, render)
 
 
 def account_options(accounts: list[Account]) -> str:
