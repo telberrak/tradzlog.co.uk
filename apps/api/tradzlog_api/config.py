@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     sentry_dsn: str | None = None
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000", "http://localhost:8001"]
+    # Screenshot storage: "local" (var/uploads) or "s3" (private bucket, presigned links).
+    storage_backend: str = "local"
+    s3_bucket: str | None = None
+    s3_region: str | None = None
+    s3_prefix: str = ""
+    s3_endpoint_url: str | None = None  # only for S3-compatible servers (MinIO in tests); unset on AWS
+    s3_url_ttl_seconds: int = 3600
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

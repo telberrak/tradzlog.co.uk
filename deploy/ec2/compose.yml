@@ -1,0 +1,124 @@
+# TradzLog on the EC2 instance it shares with Mizan. Lives in /srv/tradzlog on the server, where
+# GitHub Actions copies it on every deploy. Values come from /srv/tradzlog/.env, written by
+# tradzlog-config from AWS Parameter Store (/tradzlog/*). See docs/DEPLOY_AWS.md.
+#
+# HTTPS is handled by Mizan's Caddy: web and api join Mizan's Docker network ("edge") under the
+# aliases tradzlog-web and tradzlog-api, and /srv/mizan/sites.d/tradzlog.caddy routes the domain to
+# them. Nothing here publishes a port on the host. PostgreSQL and Redis are TradzLog's own and
+# are only reachable on TradzLog's private network, never from Mizan's.
+name: tradzlog
+
+x-app: &app
+  image: ${TRADZLOG_IMAGE:-ghcr.io/telberrak/tradzlog}:${TRADZLOG_TAG:-latest}
+  restart: unless-stopped
+  environment:
+    APP_ENV: production
+    DATABASE_URL: postgresql+psycopg://tradzlog:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/tradzlog
+    REDIS_URL: redis://redis:6379/0
+    JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+    JWT_ISSUER: ${TRADZLOG_DOMAIN:?set TRADZLOG_DOMAIN}
+    CORS_ORIGINS: '["https://${TRADZLOG_DOMAIN}"]'
+    # Screenshots: private S3 bucket; credentials come from the EC2 instance role.
+    STORAGE_BACKEND: s3
+    S3_BUCKET: ${S3_BUCKET:?set S3_BUCKET}
+    S3_REGION: ${AWS_REGION:-eu-west-2}
+    S3_PREFIX: ${S3_PREFIX:-}
+    AWS_REGION: ${AWS_REGION:-eu-west-2}
+    AWS_DEFAULT_REGION: ${AWS_REGION:-eu-west-2}
+    ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+    ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
+    RESEND_API_KEY: ${RESEND_API_KEY:-}
+    SENTRY_DSN: ${SENTRY_DSN:-}
+    LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    shm_size: 128mb
+    mem_limit: 320m
+    environment:
+      POSTGRES_USER: tradzlog
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      POSTGRES_DB: tradzlog
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tradzlog -d tradzlog']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    mem_limit: 96m
+    # Queued jobs live here too, so never evict: fail loudly instead of dropping work.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '64mb', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ['alembic', 'upgrade', 'head']
+
+  api:
+    <<: *app
+    mem_limit: 256m
+    command: ['uvicorn', 'tradzlog_api.main:app', '--host', '0.0.0.0', '--port', '8000', '--proxy-headers', '--forwarded-allow-ips', '*']
+    networks:
+      default: {}
+      edge:
+        aliases: [tradzlog-api]
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8000/livez']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  web:
+    <<: *app
+    mem_limit: 256m
+    command: ['uvicorn', 'tradzlog_web.main:app', '--host', '0.0.0.0', '--port', '8001', '--proxy-headers', '--forwarded-allow-ips', '*']
+    networks:
+      default: {}
+      edge:
+        aliases: [tradzlog-web]
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8001/livez']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    <<: *app
+    mem_limit: 256m
+    command: ['rq', 'worker', 'default', 'analytics', 'imports', 'reports', 'ai', '--url', 'redis://redis:6379/0']
+
+networks:
+  # Mizan's Compose network, where its Caddy runs. Created by Mizan's stack.
+  edge:
+    external: true
+    name: ${EDGE_NETWORK:-mizan_default}
+
+volumes:
+  postgres:
+  redis:

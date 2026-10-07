@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadTradzlogSettings",
+      "Effect": "Allow",
+      "Action": ["ssm:GetParametersByPath", "ssm:GetParameters", "ssm:GetParameter"],
+      "Resource": ["arn:aws:ssm:eu-west-2:*:parameter/tradzlog", "arn:aws:ssm:eu-west-2:*:parameter/tradzlog/*"]
+    },
+    {
+      "Sid": "DecryptTradzlogSettings",
+      "Effect": "Allow",
+      "Action": "kms:Decrypt",
+      "Resource": "*",
+      "Condition": { "StringEquals": { "kms:ViaService": "ssm.eu-west-2.amazonaws.com" } }
+    },
+    {
+      "Sid": "TradzlogScreenshots",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::TRADZLOG_UPLOADS_BUCKET/*"
+    },
+    {
+      "Sid": "TradzlogBackups",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::BACKUP_BUCKET/tradzlog/*"
+    }
+  ]
+}

@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from html import escape
-from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -15,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 
+from tradzlog_api.services import storage
 from tradzlog_api.services.ai import build_coaching_payload, generate_coaching_insight
 from tradzlog_api.services.analytics import (
     grouped_performance,
@@ -93,9 +92,10 @@ from tradzlog_web.ui import (
 init_observability()
 logger = logging.getLogger("tradzlog.web")
 
-app = FastAPI(title="TradzLog Web")
-UPLOAD_ROOT = Path("var/uploads")
+app = FastAPI(title="TradzLog Web", docs_url=None, redoc_url=None, openapi_url=None)
+UPLOAD_ROOT = storage.LOCAL_ROOT
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+# Only used by local storage; in production screenshots are private S3 objects behind presigned links.
 app.mount("/uploads-local", StaticFiles(directory=str(UPLOAD_ROOT)), name="uploads-local")
 
 
@@ -114,9 +114,13 @@ WEB_SENSITIVE_POSTS = {
 
 WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/")
 
-UPLOAD_EXTENSIONS = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
-ALLOWED_UPLOAD_TYPES = set(UPLOAD_EXTENSIONS)
+ALLOWED_UPLOAD_TYPES = set(storage.IMAGE_EXTENSIONS)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+@app.get("/livez", include_in_schema=False)
+def livez() -> dict[str, str]:
+    return {"status": "ok"}
 
 
 def is_sensitive_web_post(path: str) -> bool:
@@ -754,8 +758,9 @@ def trade_detail(trade_id: str) -> str:
             for entry_row in journals
         )
         thumbs = "".join(
-            f'<a href="{escape(row.url)}" target="_blank" rel="noopener"><img src="{escape(row.url)}" alt="{escape(row.file_name)}" loading="lazy" /></a>'
+            f'<a href="{escape(link)}" target="_blank" rel="noopener"><img src="{escape(link)}" alt="{escape(row.file_name)}" loading="lazy" /></a>'
             for row in attachments
+            for link in (storage.display_url(row.url),)
         )
         flags = "".join(f'<span class="badge badge-review">{escape(flag)}</span> ' for flag in trade.mistake_flags or [])
         body = f"""
@@ -1464,12 +1469,6 @@ def paste_preview(account_id: str = Form(...), rows: str = Form("")) -> Redirect
     return RedirectResponse("/settings/import", status_code=status.HTTP_303_SEE_OTHER)
 
 
-def safe_upload_name(content_type: str | None) -> str:
-    # Derive the extension from the validated MIME type, never the client filename,
-    # so StaticFiles can't be tricked into serving e.g. an uploaded .html page.
-    return f"{uuid4().hex}{UPLOAD_EXTENSIONS[content_type or '']}"
-
-
 def validate_upload(file: UploadFile) -> None:
     if not file.filename or "/" in file.filename or "\\" in file.filename:
         raise HTTPException(status_code=400, detail="Invalid file name")
@@ -1511,7 +1510,7 @@ def uploads_page() -> str:
             f'<option value="{escape(journal.id)}">{escape(journal.title)}</option>' for journal in journals
         )
         attachment_rows = "".join(
-            f"""<tr><td><a class="pill" href="{escape(row.url)}" target="_blank">{escape(row.file_name)}</a></td><td>{row.file_size:,}</td><td>{escape(row.mime_type)}</td><td>{escape(row.created_at.strftime("%Y-%m-%d %H:%M"))}</td></tr>"""
+            f"""<tr><td><a class="pill" href="{escape(storage.display_url(row.url))}" target="_blank" rel="noopener">{escape(row.file_name)}</a></td><td>{row.file_size:,}</td><td>{escape(row.mime_type)}</td><td>{escape(row.created_at.strftime("%Y-%m-%d %H:%M"))}</td></tr>"""
             for row in attachments
         ) or '<tr><td colspan="4" class="muted">No uploads yet.</td></tr>'
         body = f"""
@@ -1521,7 +1520,7 @@ def uploads_page() -> str:
               <div class="field"><label>Trade</label><select name="trade_id">{trade_options}</select></div>
               <div class="field" style="margin-top:12px"><label>Journal</label><select name="journal_entry_id">{journal_options}</select></div>
               <div class="field" style="margin-top:12px"><label>Image</label><input type="file" name="file" accept="image/png,image/jpeg,image/webp" required /></div>
-              <p class="muted small">Files are stored locally for development and recorded in the attachment table. Cloudflare R2 can replace this storage layer later.</p>
+              <p class="muted small">PNG, JPEG or WebP, up to 10 MB. Screenshots are private to your account.</p>
             </form>
             <section class="card" style="margin-top:16px">
               <div class="section-head"><div><div class="label">Storage</div><h2 style="margin:4px 0 0">Attachment Rules</h2></div></div>
@@ -1552,6 +1551,8 @@ async def upload_attachment(
             raise HTTPException(status_code=400, detail="No demo user available")
         linked_trade_id = trade_id or None
         linked_journal_id = journal_entry_id or None
+        if not linked_trade_id and not linked_journal_id:
+            raise HTTPException(status_code=400, detail="Attach the screenshot to a trade or a journal entry")
         validate_upload(file)
         if linked_trade_id:
             trade = session.scalar(select(Trade).where(Trade.id == linked_trade_id, Trade.user_id == user.id))
@@ -1561,23 +1562,25 @@ async def upload_attachment(
             journal = session.scalar(select(JournalEntry).where(JournalEntry.id == linked_journal_id, JournalEntry.user_id == user.id))
             if journal is None:
                 raise HTTPException(status_code=404, detail="Journal not found")
-        stored_name = safe_upload_name(file.content_type)
-        target = UPLOAD_ROOT / stored_name
-        with target.open("wb") as handle:
-            shutil.copyfileobj(file.file, handle)
-        if target.stat().st_size > MAX_UPLOAD_BYTES:
-            target.unlink(missing_ok=True)
+        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        if len(data) > MAX_UPLOAD_BYTES:
             raise HTTPException(status_code=400, detail="Upload is too large")
-        attachment = Attachment(
-            trade_id=linked_trade_id,
-            journal_entry_id=linked_journal_id,
-            url=f"/uploads-local/{stored_name}",
-            file_name=file.filename or stored_name,
-            file_size=target.stat().st_size,
-            mime_type=file.content_type or "application/octet-stream",
-            annotation_data=None,
+        # Trust the file's bytes, not the browser's content type.
+        content_type = storage.sniff_image_type(data)
+        if content_type is None:
+            raise HTTPException(status_code=400, detail="Only PNG, JPEG or WebP images are supported")
+        ref = storage.get_storage().save(user.id, data, content_type)
+        session.add(
+            Attachment(
+                trade_id=linked_trade_id,
+                journal_entry_id=linked_journal_id,
+                url=ref,
+                file_name=(file.filename or "screenshot")[:255],
+                file_size=len(data),
+                mime_type=content_type,
+                annotation_data=None,
+            )
         )
-        session.add(attachment)
         session.commit()
         return RedirectResponse("/settings/uploads", status_code=status.HTTP_303_SEE_OTHER)
     finally:

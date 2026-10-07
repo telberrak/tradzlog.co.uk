@@ -198,6 +198,12 @@ def livez() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health")
+def public_health(session: Session = Depends(db_session)) -> dict[str, str]:
+    # The public health check: only /api/* reaches the API through Caddy.
+    return {"status": "ok", "database": check_database(session)}
+
+
 def create_auth_token(
     session: Session,
     user: User,

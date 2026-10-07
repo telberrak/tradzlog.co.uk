@@ -216,10 +216,10 @@ Copy `.env.example` to `.env` and adjust values. Variables are loaded by Pydanti
 | `RESEND_API_KEY` | No | Email delivery (magic link, etc.) |
 | `GOOGLE_CLIENT_ID` | No | OAuth (planned integration) |
 | `GOOGLE_CLIENT_SECRET` | No | OAuth (planned integration) |
-| `R2_ACCOUNT_ID` | No | Cloudflare R2 for uploads (production) |
-| `R2_ACCESS_KEY_ID` | No | R2 access key |
-| `R2_SECRET_ACCESS_KEY` | No | R2 secret key |
-| `R2_BUCKET` | No | R2 bucket name (default: `tradzlog-uploads`) |
+| `STORAGE_BACKEND` | No | `local` (default, `var/uploads`) or `s3` for screenshots |
+| `S3_BUCKET` | With `s3` | Private bucket for screenshots; on EC2 credentials come from the instance role |
+| `S3_REGION` | No | Bucket region, e.g. `eu-west-2` |
+| `S3_PREFIX` | No | Key prefix inside the bucket |
 | `SENTRY_DSN` | No | Sentry error tracking |
 | `LOG_LEVEL` | No | Logging level (default: `INFO`) |
 | `AXIOM_TOKEN` | No | Axiom logging (optional) |

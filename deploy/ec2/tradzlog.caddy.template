@@ -1,0 +1,29 @@
+# TradzLog, served by Mizan's Caddy. Written to /srv/mizan/sites.d/tradzlog.caddy by every deploy
+# from deploy/ec2/tradzlog.caddy.template; edit the template in the repository, not the server copy.
+# __PLACEHOLDERS__ are filled from /srv/tradzlog/.env (Parameter Store /tradzlog/*).
+
+__TRADZLOG_DOMAIN__ {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# The API has its own sign-in (JWT bearer tokens, which use the same Authorization header as
+	# basic auth), so it is not behind the gate.
+	handle /api/* {
+		reverse_proxy tradzlog-api:8000
+	}
+
+	handle {
+		# Private beta gate. The web app has no sign-in of its own yet, so every visitor must pass
+		# this first. Set TRADZLOG_PUBLIC=true instead of the basic-auth settings only once it does.
+		__BASIC_AUTH__
+		reverse_proxy tradzlog-web:8001
+	}
+}
+
+www.__TRADZLOG_DOMAIN__ {
+	redir https://__TRADZLOG_DOMAIN__{uri} permanent
+}
