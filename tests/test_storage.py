@@ -10,6 +10,8 @@ import tradzlog_web.main as web_main
 from tradzlog_api.services import storage
 from tradzlog_db.models import Attachment, Trade, User
 
+pytestmark = pytest.mark.usefixtures("signed_in")
+
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
 WEBP = b"RIFF\x24\x00\x00\x00WEBPVP8 " + b"\x00" * 16

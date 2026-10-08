@@ -22,6 +22,8 @@ from tradzlog_db.models import (
     User,
 )
 
+pytestmark = pytest.mark.usefixtures("signed_in")
+
 
 class FakeWebSession:
     def __init__(self, scalar_results: list[object | None]) -> None:

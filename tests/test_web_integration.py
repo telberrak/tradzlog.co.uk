@@ -1,0 +1,332 @@
+"""End-to-end web tests against a real PostgreSQL database.
+
+They run when DATABASE_URL points at a reachable database (CI's Postgres service, or locally inside
+the Docker Compose network) and are skipped otherwise; set REQUIRE_DB_TESTS=1 to fail instead of
+skipping. The schema is brought to the latest migration first. Every test uses fresh, unique
+emails, so the database never needs cleaning.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import select, text
+from sqlalchemy.exc import OperationalError
+
+from tradzlog_db.session import SessionLocal, engine
+
+ROOT = Path(__file__).resolve().parents[1]
+ORIGIN = {"Origin": "http://testserver"}
+
+
+def database_ready() -> bool:
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("select 1"))
+    except OperationalError:
+        if os.getenv("REQUIRE_DB_TESTS") == "1":
+            raise
+        return False
+    return True
+
+
+pytestmark = pytest.mark.skipif(not database_ready(), reason="no reachable PostgreSQL (DATABASE_URL)")
+
+
+@pytest.fixture(scope="module", autouse=True)
+def migrated() -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
+
+
+@pytest.fixture
+def client():
+    from fastapi.testclient import TestClient
+
+    import tradzlog_web.main as web_main
+
+    with TestClient(web_main.app, base_url="http://testserver") as test_client:
+        yield test_client
+
+
+def new_client():
+    from fastapi.testclient import TestClient
+
+    import tradzlog_web.main as web_main
+
+    return TestClient(web_main.app, base_url="http://testserver")
+
+
+def csrf_from(html: str) -> str:
+    match = re.search(r'name="csrf_token" value="([0-9a-f]+)"', html)
+    assert match, "page has no CSRF field"
+    return match.group(1)
+
+
+def sign_up(client, name: str = "Trader") -> str:
+    email = f"{uuid4().hex[:12]}@example.com"
+    response = client.post(
+        "/signup",
+        data={"name": name, "email": email, "password": "correct-horse-1", "password2": "correct-horse-1"},
+        headers=ORIGIN,
+        follow_redirects=False,
+    )
+    assert response.status_code == 303, response.text
+    assert response.headers["location"] == "/dashboard"
+    return email
+
+
+# --------------------------------------------------------------------- sign-in flows
+
+
+def test_visitors_are_sent_to_sign_in(client) -> None:
+    assert client.get("/dashboard", follow_redirects=False).headers["location"] == "/login"
+    response = client.get("/trades?status_filter=OPEN", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/login?next=/trades%3Fstatus_filter%3DOPEN"
+    assert client.get("/login").status_code == 200
+    assert client.get("/livez").status_code == 200
+
+
+def test_sign_up_sign_out_and_sign_in(client) -> None:
+    email = sign_up(client, "Ada Trader")
+    cookie = client.cookies.get("tz_session")
+    assert cookie and len(cookie) > 30
+    page = client.get("/dashboard")
+    assert page.status_code == 200 and "Ada Trader" in page.text
+
+    out = client.post("/logout", data={"csrf_token": csrf_from(page.text)}, follow_redirects=False)
+    assert out.status_code == 303 and out.headers["location"] == "/login"
+    assert client.get("/dashboard", follow_redirects=False).status_code == 303
+
+    wrong = client.post("/login", data={"email": email, "password": "nope-nope-1"}, headers=ORIGIN)
+    assert wrong.status_code == 400 and "Email or password is incorrect" in wrong.text
+    right = client.post(
+        "/login",
+        data={"email": email.upper(), "password": "correct-horse-1", "next": "/analytics"},
+        headers=ORIGIN,
+        follow_redirects=False,
+    )
+    assert right.status_code == 303 and right.headers["location"] == "/analytics"
+
+
+@pytest.mark.parametrize("target", ["//evil.example/x", "https://evil.example/", "/\\evil.example", "javascript:alert(1)"])
+def test_sign_in_never_redirects_off_site(client, target: str) -> None:
+    email = sign_up(client)
+    client.cookies.clear()
+    response = client.post(
+        "/login", data={"email": email, "password": "correct-horse-1", "next": target}, headers=ORIGIN, follow_redirects=False
+    )
+    assert response.headers["location"] == "/dashboard"
+
+
+def test_forms_need_csrf_token_and_same_origin(client) -> None:
+    email = sign_up(client)
+    assert client.post("/logout", follow_redirects=False).status_code == 403
+    assert client.post("/logout", data={"csrf_token": "0" * 64}, follow_redirects=False).status_code == 403
+    client.cookies.clear()
+    cross_site = client.post(
+        "/login", data={"email": email, "password": "correct-horse-1"}, headers={"Origin": "https://evil.example"}
+    )
+    assert cross_site.status_code == 403
+    assert client.post("/login", data={"email": email, "password": "correct-horse-1"}).status_code == 403  # no Origin
+    # Signed-out POSTs to app forms go to sign-in, not to the handler.
+    assert client.post("/trades/new", data={}, follow_redirects=False).headers["location"] == "/login"
+
+
+def test_password_change_signs_out_other_devices(client) -> None:
+    email = sign_up(client)
+    with new_client() as laptop:
+        laptop.post("/login", data={"email": email, "password": "correct-horse-1"}, headers=ORIGIN)
+        assert laptop.get("/dashboard", follow_redirects=False).status_code == 200
+
+        page = client.get("/settings/security")
+        assert page.status_code == 200 and "This device" in page.text
+        changed = client.post(
+            "/settings/security/password",
+            data={"csrf_token": csrf_from(page.text), "current": "correct-horse-1", "new": "battery-staple-2", "new2": "battery-staple-2"},
+            follow_redirects=False,
+        )
+        assert "message=" in changed.headers["location"]
+        assert client.get("/dashboard", follow_redirects=False).status_code == 200  # this device stays signed in
+        assert laptop.get("/dashboard", follow_redirects=False).status_code == 303  # the other one is out
+    client.cookies.clear()
+    assert client.post("/login", data={"email": email, "password": "battery-staple-2"}, headers=ORIGIN, follow_redirects=False).status_code == 303
+
+
+def test_invite_only_sign_up(client, monkeypatch) -> None:
+    from tradzlog_api.config import settings
+
+    monkeypatch.setattr(settings, "registration_open", False)
+    monkeypatch.setattr(settings, "registration_invite_code", "beta-invite-123")
+    form = {"email": f"{uuid4().hex[:10]}@example.com", "password": "correct-horse-1", "password2": "correct-horse-1"}
+    assert "Invite code" in client.get("/signup").text
+    assert client.post("/signup", data={**form, "invite_code": "wrong"}, headers=ORIGIN).status_code == 403
+    ok = client.post("/signup", data={**form, "invite_code": "beta-invite-123"}, headers=ORIGIN, follow_redirects=False)
+    assert ok.status_code == 303
+
+
+# --------------------------------------------------------------------- isolation
+
+
+def seed_private_book(email: str, marker: str) -> dict[str, str]:
+    """Give the user an account, a trade, a journal, a screenshot record, a share and a mentor."""
+    from tradzlog_db.models import (
+        Account,
+        AccountType,
+        AssetClass,
+        Attachment,
+        Direction,
+        Execution,
+        ExecutionType,
+        Instrument,
+        JournalEntry,
+        JournalType,
+        MentorAccess,
+        MentorAccessStatus,
+        PublicTradeShare,
+        Trade,
+        TradeMetrics,
+        TradeStatus,
+        User,
+    )
+
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == email))
+        account = Account(user_id=user.id, name=f"{marker}-account", broker=f"{marker}-broker", currency="USD",
+                          starting_balance=Decimal("10000"), account_type=AccountType.LIVE)
+        instrument = Instrument(symbol=f"Z{uuid4().hex[:6].upper()}", name="Isolation test", asset_class=AssetClass.STOCK, point_value=Decimal("1"))
+        db.add_all([account, instrument])
+        db.flush()
+        opened = datetime.now(UTC) - timedelta(days=1)
+        trade = Trade(account_id=account.id, user_id=user.id, instrument_id=instrument.id, direction=Direction.LONG,
+                      status=TradeStatus.OPEN, opened_at=opened, setup_tag=f"{marker}-setup", notes=f"{marker}-notes",
+                      planned_entry=Decimal("100"), commissions=Decimal("0"), mistake_flags=[], tags=[], is_reviewed=False)
+        trade.executions = [Execution(type=ExecutionType.ENTRY, executed_at=opened, price=Decimal("100"), quantity=Decimal("10"), fees=Decimal("0"))]
+        db.add(trade)
+        db.flush()
+        db.add(TradeMetrics(trade_id=trade.id, average_entry=Decimal("100"), total_quantity=Decimal("10"), realized_pnl=Decimal("0")))
+        journal = JournalEntry(user_id=user.id, type=JournalType.DAILY, trade_id=trade.id, date=opened.date(),
+                               title=f"{marker}-journal", content={"type": "doc", "content": []}, key_lessons=[f"{marker}-lesson"])
+        db.add(journal)
+        db.flush()
+        db.add(Attachment(trade_id=trade.id, url=f"local:attachments/{user.id}/{marker}.png", file_name=f"{marker}-chart.png",
+                          file_size=10, mime_type="image/png"))
+        share = PublicTradeShare(user_id=user.id, trade_id=trade.id, slug=f"{marker}-share", title=f"{marker}-share-title")
+        db.add(share)
+        db.add(MentorAccess(student_user_id=user.id, mentor_email=f"{marker}@mentor.example", mentor_name=f"{marker}-mentor",
+                            status=MentorAccessStatus.ACTIVE, can_view_journals=True, can_comment=True))
+        db.commit()
+        return {"trade_id": trade.id, "journal_id": journal.id, "account_id": account.id, "slug": share.slug}
+    finally:
+        db.close()
+
+
+def test_users_never_see_each_others_data() -> None:
+    import tradzlog_web.main as web_main
+
+    marker = f"secret{uuid4().hex[:8]}"
+    with new_client() as alice, new_client() as bob:
+        alice_ids = seed_private_book(sign_up(alice, "Alice"), marker)
+        sign_up(bob, "Bob")
+
+        visited = 0
+        for route in web_main.app.routes:
+            path = getattr(route, "path", "")
+            if "GET" not in (getattr(route, "methods", None) or set()) or path.startswith("/share/"):
+                continue  # public trade shares are public by design
+            url = path.replace("{trade_id}", alice_ids["trade_id"]).replace("{journal_id}", alice_ids["journal_id"])
+            if "{" in url:
+                continue
+            for query in ("", f"?account_id={alice_ids['account_id']}&range=ALL", f"?day={datetime.now(UTC).date() - timedelta(days=1)}"):
+                response = bob.get(url + query, follow_redirects=True)
+                visited += 1
+                assert marker not in response.text, f"{url + query} showed Alice's data to Bob"
+                unprotected = re.findall(r'<form[^>]*method="post"[^>]*>(?!<input type="hidden" name="csrf_token")', response.text, re.I)
+                assert not unprotected, f"{url} has POST forms without a CSRF token: {unprotected}"
+        assert visited > 40
+
+        # Bob can't act on Alice's trade either.
+        page = bob.get("/dashboard")
+        token = csrf_from(page.text)
+        bob.post(f"/positions/{alice_ids['trade_id']}/close", data={"csrf_token": token, "exit_price": "1", "quantity": "10", "fees": "0"})
+        bob.post(f"/trades/{alice_ids['trade_id']}/share", data={"csrf_token": token})
+
+    from tradzlog_db.models import PublicTradeShare, Trade, TradeStatus
+
+    db = SessionLocal()
+    try:
+        assert db.get(Trade, alice_ids["trade_id"]).status == TradeStatus.OPEN
+        shares = db.scalars(select(PublicTradeShare).where(PublicTradeShare.trade_id == alice_ids["trade_id"])).all()
+        assert [share.slug for share in shares] == [alice_ids["slug"]]
+    finally:
+        db.close()
+
+
+def test_manage_trading_accounts_and_instruments(client) -> None:
+    sign_up(client, "Manager")
+    page = client.get("/trades/new")
+    assert "Create a trading account first" in page.text
+    token = csrf_from(page.text)
+
+    created = client.post("/settings/accounts", data={
+        "csrf_token": token, "name": "FTMO 100k", "broker": "FTMO", "account_type": "PROP_FIRM", "currency": "usd",
+        "starting_balance": "100,000", "prop_firm_name": "FTMO", "max_daily_loss": "5000", "max_total_loss": "10000",
+        "daily_profit_target": "",
+    }, follow_redirects=False)
+    assert "message=" in created.headers["location"]
+    listing = client.get("/settings/accounts")
+    assert "FTMO 100k" in listing.text and "$100,000.00" in listing.text and "USD" in listing.text
+
+    bad = client.post("/settings/accounts", data={
+        "csrf_token": token, "name": "", "broker": "x", "account_type": "LIVE", "currency": "USD", "starting_balance": "-5",
+        "prop_firm_name": "", "max_daily_loss": "", "max_total_loss": "", "daily_profit_target": "",
+    }, follow_redirects=False)
+    assert "error=" in bad.headers["location"]
+
+    # Instruments are a catalogue shared by all users, so the hint only shows on an empty catalogue.
+    from tradzlog_db.models import Instrument
+
+    db = SessionLocal()
+    try:
+        catalogue_empty = db.scalar(select(Instrument.id).limit(1)) is None
+    finally:
+        db.close()
+    if catalogue_empty:
+        assert "Add the instruments you trade" in client.get("/trades/new").text
+    symbol = f"T{uuid4().hex[:5].upper()}"
+    form = {"csrf_token": token, "symbol": symbol.lower(), "name": "Test", "asset_class": "FUTURES", "point_value": "50",
+            "tick_size": "0.25", "currency": "USD", "exchange": "CME"}
+    assert "message=" in client.post("/settings/instruments", data=form, follow_redirects=False).headers["location"]
+    assert "already exists" in client.post("/settings/instruments", data=form).text
+    assert symbol in client.get("/trades/new").text  # the log-trade form is now usable
+
+
+def test_users_cannot_change_each_others_accounts() -> None:
+    from tradzlog_db.models import Account
+
+    with new_client() as alice, new_client() as bob:
+        alice_ids = seed_private_book(sign_up(alice, "Alice"), f"acct{uuid4().hex[:6]}")
+        sign_up(bob, "Bob")
+        token = csrf_from(bob.get("/dashboard").text)
+        fields = {"csrf_token": token, "name": "hijacked", "broker": "x", "account_type": "LIVE", "currency": "USD",
+                  "starting_balance": "1", "prop_firm_name": "", "max_daily_loss": "", "max_total_loss": "", "daily_profit_target": ""}
+        assert "error=" in bob.post(f"/settings/accounts/{alice_ids['account_id']}", data=fields, follow_redirects=False).headers["location"]
+        assert "error=" in bob.post(f"/settings/accounts/{alice_ids['account_id']}/archive", data={"csrf_token": token}, follow_redirects=False).headers["location"]
+        assert "hijacked" not in bob.get("/settings/accounts").text
+
+    db = SessionLocal()
+    try:
+        account = db.get(Account, alice_ids["account_id"])
+        assert account.name != "hijacked" and account.archived_at is None
+    finally:
+        db.close()

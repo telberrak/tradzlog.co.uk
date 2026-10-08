@@ -6,6 +6,8 @@ import json
 import re
 from html import escape
 
+from tradzlog_web.auth import inject_csrf
+
 CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 :root{
@@ -322,6 +324,23 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .hint.warn{color:var(--warning)}
 @media(max-width:1100px){.kpi-row{grid-template-columns:repeat(3,minmax(0,1fr))}.dash-grid,.form-layout{grid-template-columns:1fr}.preview{position:static}}
 @media(max-width:640px){.kpi-row{grid-template-columns:1fr 1fr}.kpi-card .kpi{font-size:18px}.filter-bar select{min-width:0;width:100%}}
+.user-menu{position:relative}
+.user-menu summary{list-style:none;cursor:pointer}
+.user-menu summary::-webkit-details-marker{display:none}
+.user-menu-panel{position:absolute;right:0;top:42px;z-index:20;min-width:200px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-md);box-shadow:var(--shadow-md);padding:6px;display:grid;gap:2px}
+.user-menu-name{padding:8px 10px;font-weight:650;border-bottom:1px solid var(--border-subtle);margin-bottom:4px}
+.user-menu-panel a,.user-menu-panel button{display:block;width:100%;text-align:left;padding:8px 10px;border-radius:6px;color:var(--text-primary);background:none;border:0;font:inherit;font-size:13px;cursor:pointer}
+.user-menu-panel a:hover,.user-menu-panel button:hover{background:var(--bg-surface-alt)}
+.user-menu-panel form{margin:0}
+.auth-wrap{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 16px}
+.auth-brand{border:none;margin:0 0 16px;padding:0}
+.auth-card{width:100%;max-width:400px;padding:24px}
+.auth-card h1{font-size:20px;margin:0 0 16px}
+.auth-card form{display:grid;gap:14px}
+.auth-card .btn{height:40px;width:100%}
+.auth-card .switch{margin:16px 0 0;font-size:13px;color:var(--text-muted);text-align:center}
+.form-error{background:var(--danger-soft);color:var(--danger);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
+.form-ok{background:var(--success-soft);color:var(--success);border:1px solid rgba(16,185,129,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
 """
 
 THEME_SCRIPT = """
@@ -375,6 +394,7 @@ NAV_ICONS: dict[str, str] = {
     "journal": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M8 5v14M8 9h4"/></svg>',
     "analytics": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M10 19V9M16 19v-6M22 19V3"/></svg>',
     "coaching": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a7 7 0 0 1 7 7c0 3-2 5-4 6l-1 5H10l-1-5c-2-1-4-3-4-6a7 7 0 0 1 7-7z"/></svg>',
+    "accounts": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M8 15h3"/></svg>',
     "settings": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2M4.2 19.8l1.4-1.4M18.4 5.6l1.4-1.4"/></svg>',
 }
 
@@ -388,6 +408,7 @@ def sidebar_nav(active: str) -> str:
         ("Journal", "/journal", "journal"),
         ("Analytics", "/analytics", "analytics"),
         ("AI Coaching", "/coaching", "coaching"),
+        ("Accounts", "/settings/accounts", "accounts"),
         ("Import", "/settings/import", "settings"),
     ]
     links = []
@@ -409,7 +430,7 @@ def shell(
 ) -> str:
     initials = escape("".join(part[:1] for part in user_name.split()[:2]).upper() or "T")
     del show_range  # the date range now lives in each page's filter bar
-    return f"""<!doctype html>
+    return inject_csrf(f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -437,7 +458,15 @@ def shell(
           <div class="topbar-actions">
             <a class="btn btn-primary" href="/trades/new"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" width="14" height="14" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Log trade</a>
             <button type="button" class="btn theme-toggle" id="theme-toggle" aria-label="Switch color theme">Theme</button>
-            <div class="avatar" aria-label="User avatar">{initials}</div>
+            <details class="user-menu">
+              <summary class="avatar" aria-label="Account menu for {escape(user_name)}">{initials}</summary>
+              <div class="user-menu-panel">
+                <div class="user-menu-name">{escape(user_name)}</div>
+                <a href="/settings/accounts">Trading accounts</a>
+                <a href="/settings/security">Security</a>
+                <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+              </div>
+            </details>
           </div>
         </header>
         <main class="page-content">{body}</main>
@@ -445,7 +474,30 @@ def shell(
     </div>
     <script>{THEME_TOGGLE_SCRIPT}{ROW_LINK_SCRIPT}</script>
   </body>
-</html>"""
+</html>""")
+
+
+def auth_page(title: str, body: str) -> str:
+    """Centred single-card layout for sign-in and sign-up (no app navigation)."""
+    return inject_csrf(f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)} · TradzLog</title>
+    <style>{CSS}</style>
+    <script>{THEME_SCRIPT}</script>
+  </head>
+  <body>
+    <main class="auth-wrap">
+      <div class="sidebar-brand auth-brand"><div class="logo">TZ</div><div class="name">TRADZLOG</div></div>
+      <section class="card auth-card">
+        <h1>{escape(title)}</h1>
+        {body}
+      </section>
+    </main>
+  </body>
+</html>""")
 
 def kpi_card(label: str, value: str, value_tone: str = "neutral", note: str = "") -> str:
     return (

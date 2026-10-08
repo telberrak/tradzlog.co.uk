@@ -4,9 +4,10 @@ import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from html import escape
+from urllib.parse import quote
 from uuid import uuid4
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -62,6 +63,8 @@ from tradzlog_db.models import (
 )
 from tradzlog_db.session import SessionLocal
 from tradzlog_web import book
+from tradzlog_web.account_routes import router as account_router
+from tradzlog_web.auth import LoginRequired, current_user, web_auth
 from tradzlog_web.components import (
     edge_bars,
     equity_chart,
@@ -78,6 +81,7 @@ from tradzlog_web.components import (
     tone,
     trade_table,
 )
+from tradzlog_web.settings_routes import router as settings_router
 from tradzlog_web.ui import (
     coach_quality_badge,
     empty_state,
@@ -92,7 +96,24 @@ from tradzlog_web.ui import (
 init_observability()
 logger = logging.getLogger("tradzlog.web")
 
-app = FastAPI(title="TradzLog Web", docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(
+    title="TradzLog Web",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+    # Identify the signed-in user and enforce CSRF on every POST (see tradzlog_web.auth).
+    dependencies=[Depends(web_auth)],
+)
+app.include_router(account_router)
+app.include_router(settings_router)
+
+
+@app.exception_handler(LoginRequired)
+async def login_required(request: Request, exc: LoginRequired) -> RedirectResponse:
+    del exc
+    target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    destination = f"/login?next={quote(target)}" if request.method == "GET" and target not in {"/", "/dashboard"} else "/login"
+    return RedirectResponse(destination, status_code=status.HTTP_303_SEE_OTHER)
 UPLOAD_ROOT = storage.LOCAL_ROOT
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 # Only used by local storage; in production screenshots are private S3 objects behind presigned links.
@@ -105,6 +126,9 @@ WEB_SENSITIVE_POSTS = {
     "/settings/import/preview",
     "/settings/import/paste",
     "/settings/uploads",
+    "/login",
+    "/signup",
+    "/settings/security/password",
     "/settings/billing/checkout",
     "/settings/billing/portal",
     "/community/leaderboard",
@@ -168,23 +192,8 @@ async def web_security_headers(request: Request, call_next):
     )
     return response
 
-def demo_user() -> tuple[User | None, str | None]:
-    session = SessionLocal()
-    try:
-        user = session.scalar(select(User).order_by(User.created_at.asc()))
-        return user, None
-    except SQLAlchemyError as exc:
-        return None, str(exc)
-    finally:
-        session.close()
-
-
 def today_utc() -> date:
     return datetime.now(UTC).date()
-
-
-def first_user(session) -> User | None:
-    return session.scalar(select(User).order_by(User.created_at.asc()))
 
 
 def load_book(session, user: User, account_id: str | None) -> tuple[list[Account], Account | None, list[Trade]]:
@@ -272,7 +281,7 @@ def no_user_page(title: str, active: str) -> str:
 def render_dashboard(account_id: str | None = None, range_code: str | None = None, month: str | None = None) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return no_user_page("Dashboard", "dashboard")
         today = today_utc()
@@ -336,7 +345,7 @@ def settings_home() -> RedirectResponse:
 def portfolio_data() -> dict[str, object]:
     session = SessionLocal()
     try:
-        user = session.scalar(select(User).order_by(User.created_at.asc()))
+        user = current_user(session)
         if user is None:
             return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
         accounts = session.scalars(
@@ -418,7 +427,7 @@ def trades(
 ) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return no_user_page("Trades", "trades")
         today = today_utc()
@@ -512,15 +521,17 @@ LOG_TRADE_SCRIPT = """
 def new_trade(account_id: str | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return no_user_page("Log trade", "trades")
         accounts = session.scalars(
             select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None)).order_by(Account.created_at)
         ).all()
         if not accounts:
-            return shell("Log trade", "trades", empty_state("Create an account first", "Trades are logged against a trading account."), "Log trade", user.name or user.email)
+            return shell("Log trade", "trades", empty_state("Create a trading account first", "Trades are logged against a trading account, such as your broker account or a prop-firm challenge.", "/settings/accounts", "Create trading account"), "Log trade", user.name or user.email)
         instruments = session.scalars(select(Instrument).order_by(Instrument.symbol).limit(500)).all()
+        if not instruments:
+            return shell("Log trade", "trades", empty_state("Add the instruments you trade", "Add each symbol once, with its point value, so P&L and risk are calculated correctly.", "/settings/instruments", "Add instruments"), "Log trade", user.name or user.email)
         setup_tags = session.scalars(
             select(Trade.setup_tag).where(Trade.user_id == user.id, Trade.setup_tag.is_not(None)).distinct().limit(50)
         ).all()
@@ -662,7 +673,7 @@ def create_trade_from_form(
             raise HTTPException(status_code=400, detail="Closed time is before opened time")
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         account = session.scalar(select(Account).where(Account.id == account_id, Account.user_id == user.id))
@@ -724,7 +735,7 @@ def create_trade_from_form(
 def trade_detail(trade_id: str) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return no_user_page("Trade", "trades")
         trade = session.scalar(
@@ -812,7 +823,7 @@ def trade_detail(trade_id: str) -> str:
 def positions() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Positions", "positions", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         trades = session.scalars(
@@ -874,7 +885,7 @@ def close_position(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         trade = session.scalar(
@@ -948,7 +959,7 @@ def plain_text_from_tiptap(content: dict[str, object]) -> str:
 def journal_feed(entry_type: str | None = Query(default=None), day: date | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Journal", "journal", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         query = select(JournalEntry).where(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc(), JournalEntry.created_at.desc())
@@ -1015,7 +1026,7 @@ def new_journal(
 ) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("New Journal", "journal", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         trade = None
@@ -1067,7 +1078,7 @@ def create_journal_from_form(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         linked_trade_id = trade_id or None
@@ -1108,7 +1119,7 @@ def trade_journal_shortcut(trade_id: str) -> RedirectResponse:
 def journal_detail(journal_id: str) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Journal Entry", "journal", '<section class="empty" style="margin-top:18px">No users found.</section>')
         entry = session.scalar(select(JournalEntry).where(JournalEntry.id == journal_id, JournalEntry.user_id == user.id))
@@ -1232,7 +1243,7 @@ def analytics_page(
     """Load the filtered book once and hand the closed trades in range to ``render``."""
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return no_user_page(title, "analytics")
         today = today_utc()
@@ -1360,7 +1371,7 @@ def account_options(accounts: list[Account]) -> str:
 def import_settings() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Import", "settings", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         accounts = session.scalars(select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None))).all()
@@ -1411,7 +1422,7 @@ async def import_preview(
 ) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         account = session.scalar(select(Account).where(Account.id == account_id, Account.user_id == user.id))
@@ -1480,7 +1491,7 @@ def validate_upload(file: UploadFile) -> None:
 def uploads_page() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Uploads", "settings", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         trades = session.scalars(
@@ -1546,7 +1557,7 @@ async def upload_attachment(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         linked_trade_id = trade_id or None
@@ -1621,7 +1632,7 @@ def closed_trade_rows(trades: list[Trade]) -> str:
 def reports_hub() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Reports", "reports", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         metrics = summary(session, user.id)
@@ -1653,7 +1664,7 @@ def reports_hub() -> str:
 def performance_report() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Performance Report", "reports", '<section class="empty" style="margin-top:18px">No users found.</section>')
         metrics = summary(session, user.id)
@@ -1694,7 +1705,7 @@ def performance_report() -> str:
 def tax_csv_download() -> Response:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         return Response(
@@ -1710,7 +1721,7 @@ def tax_csv_download() -> Response:
 def prop_firm_report() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Prop Firm Report", "reports", '<section class="empty" style="margin-top:18px">No users found.</section>')
         accounts = session.scalars(
@@ -1774,7 +1785,7 @@ def insight_cards(insights: list[AIInsight]) -> str:
 def coaching_dashboard() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("AI Coaching", "coaching", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         metrics = summary(session, user.id)
@@ -1812,7 +1823,7 @@ def coaching_dashboard() -> str:
 def generate_coaching() -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         payload = build_coaching_payload(dict(summary(session, user.id)), grouped_performance(session, user.id, "setup"))
@@ -1843,7 +1854,7 @@ def coach_answer(question: str, metrics: dict[str, object], setups: list[dict[st
 def coaching_chat() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Ask the Coach", "coaching", '<section class="empty" style="margin-top:18px">No users found.</section>')
         body = f"""
@@ -1862,7 +1873,7 @@ def coaching_chat() -> str:
 def coaching_chat_answer(question: str = Form(...)) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         recent_trades = session.scalars(
@@ -1889,7 +1900,7 @@ def coaching_chat_answer(question: str = Form(...)) -> str:
 def coaching_prompts(prompt_date: date | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Journal Prompts", "coaching", '<section class="empty" style="margin-top:18px">No users found.</section>')
         target_date = prompt_date or date.today()
@@ -1960,7 +1971,7 @@ def plan_cards(current_plan: Plan) -> str:
 def billing_page() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Billing", "settings", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         subscription = current_subscription(session, user)
@@ -2008,7 +2019,7 @@ def billing_page() -> str:
 def billing_checkout(plan: Plan = Form(...)) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         now = datetime.now(UTC)
@@ -2075,7 +2086,7 @@ def leaderboard_rows(session) -> str:
 def community_page() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Community", "community", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         profile = session.scalar(select(LeaderboardProfile).where(LeaderboardProfile.user_id == user.id))
@@ -2127,7 +2138,7 @@ def save_leaderboard_profile(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         profile = session.scalar(select(LeaderboardProfile).where(LeaderboardProfile.user_id == user.id))
@@ -2148,7 +2159,7 @@ def save_leaderboard_profile(
 def share_trade(trade_id: str) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         trade = session.scalar(select(Trade).options(selectinload(Trade.instrument)).where(Trade.id == trade_id, Trade.user_id == user.id))
@@ -2202,7 +2213,7 @@ def public_share(slug: str) -> str:
 def mentor_page() -> str:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             return shell("Mentor Mode", "community", '<section class="empty" style="margin-top:18px">No users found.</section>')
         accesses = session.scalars(select(MentorAccess).where(MentorAccess.student_user_id == user.id).order_by(MentorAccess.created_at.desc())).all()
@@ -2261,7 +2272,7 @@ def grant_mentor_access(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         access = MentorAccess(
@@ -2287,7 +2298,7 @@ def create_mentor_comment(
 ) -> RedirectResponse:
     session = SessionLocal()
     try:
-        user = first_user(session)
+        user = current_user(session)
         if user is None:
             raise HTTPException(status_code=400, detail="No demo user available")
         access = session.scalar(

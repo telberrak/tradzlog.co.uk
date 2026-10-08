@@ -1,4 +1,3 @@
-import hmac
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -12,10 +11,8 @@ from tradzlog_api.config import settings
 from tradzlog_api.deps import current_user, db_session
 from tradzlog_api.security import (
     create_access_token,
-    generate_one_time_token,
     hash_one_time_token,
     hash_password,
-    verify_password,
 )
 from tradzlog_api.services.analytics import (
     grouped_performance,
@@ -39,6 +36,13 @@ from tradzlog_api.services.imports import parse_broker_csv
 from tradzlog_api.services.metrics import compute_planned_rr, compute_trade_metrics
 from tradzlog_api.services.observability import finish_request, init_observability, start_request
 from tradzlog_api.services.risk import evaluate_rules
+from tradzlog_api.services.users import (
+    EmailTaken,
+    RegistrationClosed,
+    authenticate,
+    create_auth_token,
+    register_user,
+)
 from tradzlog_db.models import (
     Account,
     AccountSnapshot,
@@ -205,24 +209,6 @@ def public_health(session: Session = Depends(db_session)) -> dict[str, str]:
     return {"status": "ok", "database": check_database(session)}
 
 
-def create_auth_token(
-    session: Session,
-    user: User,
-    purpose: AuthTokenPurpose,
-    expires_in: timedelta,
-) -> str:
-    raw_token = generate_one_time_token()
-    session.add(
-        AuthToken(
-            user_id=user.id,
-            purpose=purpose,
-            token_hash=hash_one_time_token(raw_token),
-            expires_at=datetime.now(UTC) + expires_in,
-        )
-    )
-    return raw_token
-
-
 def dev_token_response(token: str) -> dict[str, object]:
     # One-time tokens must only ever reach the user by email; echo them back only in local dev.
     response: dict[str, object] = {"ok": True, "delivery": "email"}
@@ -245,29 +231,14 @@ def consume_auth_token(session: Session, raw_token: str, purpose: AuthTokenPurpo
     return token
 
 
-def registration_allowed(invite_code: str | None) -> bool:
-    if settings.registration_open:
-        return True
-    expected = settings.registration_invite_code
-    # Closed with no code configured means nobody can sign up; compare in constant time.
-    return bool(expected and invite_code and hmac.compare_digest(invite_code.encode(), expected.encode()))
-
-
 @app.post("/api/auth/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, session: Session = Depends(db_session)) -> User:
-    if not registration_allowed(payload.invite_code):
-        raise HTTPException(status_code=403, detail="Sign-up is by invitation only")
-    existing = session.scalar(select(User).where(User.email == payload.email.lower()))
-    if existing is not None:
-        raise HTTPException(status_code=409, detail="Email is already registered")
-    user = User(
-        email=payload.email.lower(),
-        name=payload.name,
-        hashed_password=hash_password(payload.password),
-    )
-    session.add(user)
-    session.flush()
-    create_auth_token(session, user, AuthTokenPurpose.EMAIL_VERIFICATION, timedelta(hours=24))
+    try:
+        user = register_user(session, payload.email, payload.password, payload.name, payload.invite_code)
+    except RegistrationClosed:
+        raise HTTPException(status_code=403, detail="Sign-up is by invitation only") from None
+    except EmailTaken:
+        raise HTTPException(status_code=409, detail="Email is already registered") from None
     session.commit()
     session.refresh(user)
     return user
@@ -275,8 +246,8 @@ def register(payload: RegisterRequest, session: Session = Depends(db_session)) -
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 def login(payload: LoginRequest, session: Session = Depends(db_session)) -> TokenResponse:
-    user = session.scalar(select(User).where(User.email == payload.email.lower()))
-    if user is None or user.hashed_password is None or not verify_password(payload.password, user.hashed_password):
+    user = authenticate(session, payload.email, payload.password)
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return TokenResponse(access_token=create_access_token(user.id))
 

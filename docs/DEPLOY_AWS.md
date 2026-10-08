@@ -24,10 +24,11 @@ and GitHub Actions for deploys.
   when idle. Watch `docker stats` and `free -m` for the first week; if swap is in steady use,
   move the instance to t4g.medium (4 GB, about $13 a month more).
 
-> **Private beta.** The web app does not have its own sign-in yet: it always shows the first
-> registered user. Until it does, Caddy puts a username and password (HTTP basic auth) in front
-> of the web app. The deploy refuses to publish the site without it unless you explicitly set
-> `TRADZLOG_PUBLIC=true`. The API under `/api` is not gated; it has its own sign-in.
+> **Sign-in and the beta gate.** The web app has its own accounts and sign-in (secure session
+> cookie, CSRF protection, per-user data). Caddy can additionally put a username and password
+> (HTTP basic auth) in front of the whole web app, for a private beta. The deploy refuses to
+> publish the site without that gate unless you explicitly set `TRADZLOG_PUBLIC=true`; see
+> [Removing the beta gate](#removing-the-beta-gate). The API under `/api` is never gated.
 
 Run the AWS commands from your PC with the AWS CLI signed in to the account, region eu-west-2.
 
@@ -179,15 +180,25 @@ the previous version runs on the newer schema, so keep migrations backwards comp
 
 ## 7. First sign-up
 
-The database starts empty and sign-up is invite-only. Register your user through the API (not
-gated) with `REGISTRATION_INVITE_CODE`, then open the site with the basic-auth username and password:
+Sign-up is invite-only while `REGISTRATION_OPEN` is not `true`. Open `https://tradzlog.com/signup`
+(past the beta gate, if it is on), enter your details and the `REGISTRATION_INVITE_CODE`, and you
+are signed in. Then add your trading accounts under **Accounts** and your symbols under
+**Accounts → Instruments** (`/settings/instruments`).
+
+## Removing the beta gate
+
+Once you are happy for visitors to reach the sign-in page directly:
+
+1. Parameter Store: create `/tradzlog/TRADZLOG_PUBLIC` = `true`, and delete
+   `/tradzlog/TRADZLOG_BASIC_AUTH_USER` and `/tradzlog/TRADZLOG_BASIC_AUTH_HASH`.
+2. Apply it on the server (or push any commit to deploy):
 
 ```bash
-curl -sS https://tradzlog.com/api/auth/register -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"a-strong-password","name":"Your Name","invite_code":"YOUR-INVITE-CODE"}'
+sudo -u deploy bash -c 'cd /srv/tradzlog && bash config.sh && python3 render-caddy.py tradzlog.caddy.template .env /srv/mizan/sites.d/tradzlog.caddy && docker compose --project-directory /srv/mizan exec -T caddy caddy reload --config /etc/caddy/Caddyfile'
 ```
 
-Create your trading accounts as described in the README (API docs are not exposed publicly;
-run the API locally to browse them).
+Sign-up stays invite-only until you also set `/tradzlog/REGISTRATION_OPEN` = `true` (and run
+`docker compose up -d` in `/srv/tradzlog` after `config.sh`, so the apps pick it up).
 
 ## Operations
 

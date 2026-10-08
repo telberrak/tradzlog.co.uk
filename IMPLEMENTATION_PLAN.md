@@ -86,6 +86,12 @@ screenshot, `/api/health` is green in an uptime monitor, and a nightly backup ha
 
 ## M1. Real accounts and sign-in (launch blocker)
 
+**Status:** first step done (8 October 2026): sessions, sign-in/up/out, `current_user` in every
+handler, CSRF on every form, security page, trading-account and instrument management, and
+database-backed tests (sign-in flows, CSRF, an isolation crawl proven to catch leaks). Still to do:
+timezone-aware ranges, profile page, removing the beta gate (an ops step, see docs/DEPLOY_AWS.md),
+optional Google sign-in.
+
 **Approach:** server-side sessions for the web app (it is server-rendered), reusing the
 existing password hashing and one-time tokens. Keep JWT for the API.
 

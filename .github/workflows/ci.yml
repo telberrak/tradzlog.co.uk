@@ -18,6 +18,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Web integration tests (sign-in, CSRF, cross-user isolation) need a real database.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tradzlog
+          POSTGRES_PASSWORD: tradzlog
+          POSTGRES_DB: tradzlog
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U tradzlog" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://tradzlog:tradzlog@localhost:5432/tradzlog
+      REQUIRE_DB_TESTS: '1'
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5

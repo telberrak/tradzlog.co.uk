@@ -195,6 +195,20 @@ class AuthToken(TimestampMixin, Base):
     user: Mapped[User] = relationship(back_populates="auth_tokens")
 
 
+class WebSession(TimestampMixin, Base):
+    """A signed-in browser. The cookie holds a random token; only its SHA-256 is stored here."""
+
+    __tablename__ = "web_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    user_agent: Mapped[str | None] = mapped_column(String(255))
+    ip_address: Mapped[str | None] = mapped_column(String(64))
+
+
 class BillingSubscription(TimestampMixin, Base):
     __tablename__ = "billing_subscriptions"
     __table_args__ = (Index("ix_billing_subscriptions_user_status", "user_id", "status"),)
