@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from tradzlog_db.models import Account, AccountType, AssetClass, Instrument
 from tradzlog_db.session import SessionLocal
 from tradzlog_web.auth import current_user
-from tradzlog_web.components import money
+from tradzlog_web.components import money, plain_number
 from tradzlog_web.ui import shell
 
 router = APIRouter()
@@ -283,7 +283,7 @@ def instruments_page(message: str = Query(default=""), error: str = Query(defaul
         instruments = db.scalars(select(Instrument).order_by(Instrument.asset_class, Instrument.symbol)).all()
         rows = "".join(
             f"""<tr><td><b>{escape(row.symbol)}</b></td><td>{escape(row.name)}</td><td>{escape(ASSET_CLASSES[row.asset_class])}</td>
-              <td class="num">{escape(str(row.point_value or 1).rstrip('0').rstrip('.'))}</td><td>{escape(row.currency)}</td><td>{escape(row.exchange or '')}</td></tr>"""
+              <td class="num">{escape(plain_number(row.point_value or 1))}</td><td>{escape(row.currency)}</td><td>{escape(row.exchange or '')}</td></tr>"""
             for row in instruments
         ) or '<tr><td colspan="6" class="muted">No instruments yet. Add the symbols you trade below.</td></tr>'
         body = f"""

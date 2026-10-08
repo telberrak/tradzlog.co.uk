@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, select
 from starlette.concurrency import run_in_threadpool
 
-from tradzlog_api.services.imports import DATE_ORDERS, FORMATS, ImportFormatError, parse_import
+from tradzlog_api.services.imports import DATE_ORDERS, FORMATS, PARSER_VERSION, ImportFormatError, parse_import
 from tradzlog_api.services.trade_import import (
     UndoNotAllowed,
     apply_import,
@@ -26,7 +26,7 @@ from tradzlog_api.services.trade_import import (
 from tradzlog_db.models import Account, BrokerSync, BrokerSyncStatus, BrokerSyncType
 from tradzlog_db.session import SessionLocal
 from tradzlog_web.auth import current_user
-from tradzlog_web.components import kpi, money, number
+from tradzlog_web.components import kpi, money, number, plain_number
 from tradzlog_web.localtime import fmt, timezone_names, valid_timezone, zone
 from tradzlog_web.ui import shell
 
@@ -193,6 +193,7 @@ def create_preview(account_id: str, file_format: str, timezone: str, date_order:
                 "problem_count": len(result.problems),
                 "skipped": result.skipped,
                 "date_note": result.date_note,
+                "parser_version": PARSER_VERSION,
             },
         )
         db.add(batch)
@@ -216,15 +217,26 @@ def pnl_check(tradzlog: Decimal | None, broker: Decimal | None) -> str:
     return f'<p class="hint">Broker-reported P&amp;L for these fills: <b>{money(broker, signed=True)}</b>; TradzLog: <b>{money(tradzlog, signed=True)}</b>, {verdict}.</p>'
 
 
+def stale(batch: BrokerSync) -> bool:
+    return (batch.payload or {}).get("parser_version") != PARSER_VERSION
+
+
+STALE_MESSAGE = ("This upload was read by an older version of the importer, which has since been improved. "
+                 "Discard it and upload the file again to import it correctly.")
+
+
 def preview_body(db, batch: BrokerSync, account: Account) -> str:
     payload = batch.payload or {}
+    if stale(batch):
+        return f"""<p class="form-error" role="alert">{escape(STALE_MESSAGE)}</p>
+          <form method="post" action="/settings/import/{escape(batch.id)}/discard"><button class="btn btn-primary" type="submit">Discard this upload</button></form>"""
     fills = [from_row(row) for row in payload.get("rows", [])]
     plan = plan_import(db, account, fills)
     new_prints = {fingerprint for _, fingerprint in plan.new_fills}
     prints = fingerprints(account.id, fills)
     instruments = "".join(
         f"""<tr><td><b>{escape(symbol)}</b></td><td>{escape(spec.asset_class.value.title())}</td>
-          <td><input name="pv_{escape(symbol)}" type="number" step="any" min="0" value="{escape(str(spec.point_value.normalize()))}" style="max-width:140px" /></td>
+          <td><input name="pv_{escape(symbol)}" type="number" step="any" min="0" value="{escape(plain_number(spec.point_value))}" style="max-width:140px" /></td>
           <td>{'<span class="badge badge-review">Check this</span>' if spec.needs_review else '<span class="muted small">From the file or a known contract</span>'}</td></tr>"""
         for symbol, spec in sorted(plan.new_instruments.items())
     )
@@ -354,6 +366,8 @@ def run_confirm(batch_id: str, point_values: dict[str, Decimal]) -> RedirectResp
         batch, account = found
         if batch.status != BrokerSyncStatus.PENDING:
             return back(f"/settings/import/{batch_id}", error="This import has already been processed.")
+        if stale(batch):
+            return back(f"/settings/import/{batch_id}", error=STALE_MESSAGE)
         fills = [from_row(row) for row in (batch.payload or {}).get("rows", [])]
         try:
             summary = apply_import(db, batch, account, fills, point_values)

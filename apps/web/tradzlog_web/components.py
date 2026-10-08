@@ -50,6 +50,14 @@ def price(value: Decimal | None) -> str:
     return f"{whole}.{frac.ljust(2, '0')}"
 
 
+def plain_number(value: Decimal | int | float | None) -> str:
+    """100.0000 -> "100", 0.5000 -> "0.5", never scientific notation like 1E+2."""
+    if value is None:
+        return ""
+    text = format(Decimal(value), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def tone(value: Decimal | int | float | None) -> str:
     amount = Decimal(value or 0)
     if amount > 0:

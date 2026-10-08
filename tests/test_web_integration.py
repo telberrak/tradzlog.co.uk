@@ -554,3 +554,26 @@ def test_ambiguous_dates_are_flagged_in_the_preview(client) -> None:
     account_id, token = account_with_csrf(client, "Dates")
     batch = upload(client, token, account_id, "dates.csv", b"Symbol,Date/Time,Side,Quantity,Price\nAAPL,03/04/2026 10:00,BUY,1,100\n", tz="UTC")
     assert "could be read either way" in client.get(f"/settings/import/{batch}").text
+
+
+def test_uploads_read_by_an_older_importer_cannot_be_confirmed(client) -> None:
+    from tradzlog_db.models import BrokerSync, Trade
+
+    sign_up(client)
+    account_id, token = account_with_csrf(client, "Stale")
+    batch = upload(client, token, account_id, "a.csv", b"Symbol,Date/Time,Side,Quantity,Price\nAAPL,2026-03-02 10:00,BUY,1,100\n", tz="UTC")
+    db = SessionLocal()
+    try:
+        record = db.get(BrokerSync, batch)
+        record.payload = {**record.payload, "parser_version": 1}
+        db.commit()
+    finally:
+        db.close()
+    assert "older version of the importer" in client.get(f"/settings/import/{batch}").text
+    refused = client.post(f"/settings/import/{batch}/confirm", data={"csrf_token": token}, follow_redirects=False)
+    assert "error=" in refused.headers["location"]
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Trade.id).where(Trade.account_id == account_id)) is None
+    finally:
+        db.close()

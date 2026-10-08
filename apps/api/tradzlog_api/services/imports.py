@@ -19,6 +19,10 @@ from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from io import StringIO
 
+# Bump whenever parsing changes what a file produces: uploads read by an older version can't be
+# confirmed (their stored rows would import the old, wrong reading) and must be uploaded again.
+PARSER_VERSION = 3
+
 FORMATS: dict[str, str] = {
     "auto": "Detect automatically",
     "generic": "Generic CSV (one fill per row)",
