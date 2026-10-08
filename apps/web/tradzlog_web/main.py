@@ -62,7 +62,7 @@ from tradzlog_db.models import (
     User,
 )
 from tradzlog_db.session import SessionLocal
-from tradzlog_web import book
+from tradzlog_web import book, localtime
 from tradzlog_web.account_routes import router as account_router
 from tradzlog_web.auth import LoginRequired, current_user, web_auth
 from tradzlog_web.components import (
@@ -193,7 +193,8 @@ async def web_security_headers(request: Request, call_next):
     return response
 
 def today_utc() -> date:
-    return datetime.now(UTC).date()
+    """Today in the signed-in user's timezone (name kept for existing callers)."""
+    return localtime.today()
 
 
 def load_book(session, user: User, account_id: str | None) -> tuple[list[Account], Account | None, list[Trade]]:
@@ -296,7 +297,7 @@ def render_dashboard(account_id: str | None = None, range_code: str | None = Non
         closing = curve[-1].balance if curve else opening
         account_param = selected.id if selected else None
         nav_href = "/dashboard" + query_string({"account_id": account_param, "range": period.code})
-        recent = [trade for trade in trades if period.contains(trade.opened_at.date())][:8]
+        recent = [trade for trade in trades if period.contains(book.opened_day(trade))][:8]
         setups = book.by_expectancy(book.group_by(current, lambda trade: trade.setup_tag or "Untagged"))
         instruments = book.by_expectancy(book.group_by(current, lambda trade: trade.instrument.symbol))
         all_closed = [trade for trade in trades if trade.status == TradeStatus.CLOSED]
@@ -438,7 +439,7 @@ def trades(
         rows = [
             trade for trade in all_trades
             # open positions stay visible whatever the range: they are still live risk
-            if (period.contains(trade.opened_at.date()) or trade.status == TradeStatus.OPEN)
+            if (period.contains(book.opened_day(trade)) or trade.status == TradeStatus.OPEN)
             and (current_status is None or trade.status.value == current_status)
         ][:500]
         tabs = filter_tabs([
@@ -575,7 +576,7 @@ def new_trade(account_id: str | None = Query(default=None)) -> str:
               <div class="field"><label for="f-qty">Size</label><input id="f-qty" name="quantity" {decimal_input} min="0" required /></div>
             </div>
             <div class="form-row" style="margin-top:12px">
-              <div class="field"><label for="f-opened">Opened</label><input id="f-opened" type="datetime-local" name="opened_at" required /></div>
+              <div class="field"><label for="f-opened">Opened ({escape(user.timezone or "UTC")})</label><input id="f-opened" type="datetime-local" name="opened_at" required /></div>
               <div class="field"><label for="f-efee">Entry fees</label><input id="f-efee" name="entry_fees" {decimal_input} value="0" /></div>
             </div>
           </div>
@@ -583,7 +584,7 @@ def new_trade(account_id: str | None = Query(default=None)) -> str:
             <h3>Outcome <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:500">— leave blank if still open</span></h3>
             <div class="form-row">
               <div class="field"><label for="f-exit">Exit</label><input id="f-exit" name="exit_price" {decimal_input} /></div>
-              <div class="field"><label for="f-closed">Closed</label><input id="f-closed" type="datetime-local" name="closed_at" /></div>
+              <div class="field"><label for="f-closed">Closed ({escape(user.timezone or "UTC")})</label><input id="f-closed" type="datetime-local" name="closed_at" /></div>
               <div class="field"><label for="f-xfee">Exit fees</label><input id="f-xfee" name="exit_fees" {decimal_input} value="0" /></div>
             </div>
           </div>
@@ -630,7 +631,8 @@ def form_datetime(value: str) -> datetime | None:
         parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid date: {value!r}") from None
-    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+    # The form's datetime-local fields carry no timezone: they are the user's local time.
+    return localtime.from_local_input(parsed)
 
 
 @app.post("/trades/new")
@@ -848,7 +850,7 @@ def positions() -> str:
                 <td>{money(entry)}</td>
                 <td>{number(quantity)}</td>
                 <td>{money(risk)}</td>
-                <td>{escape(trade.opened_at.strftime("%Y-%m-%d %H:%M"))}</td>
+                <td>{escape(localtime.fmt(trade.opened_at))}</td>
                 <td>
                   <form method="post" action="/positions/{escape(trade.id)}/close" style="display:flex;gap:8px;align-items:center">
                     <input aria-label="Exit price" name="exit_price" type="number" step="0.00000001" placeholder="Exit" required style="max-width:110px" />
@@ -977,7 +979,7 @@ def journal_feed(entry_type: str | None = Query(default=None), day: date | None 
                     .where(Trade.user_id == user.id)
                     .order_by(Trade.opened_at)
                 ).all()
-                if trade.opened_at.date() == day or book.closed_day(trade) == day
+                if book.opened_day(trade) == day or book.closed_day(trade) == day
             ]
             day_net = sum((book.pnl(trade) for trade in day_trades if book.closed_day(trade) == day), Decimal("0"))
             day_panel = f"""<section class="card" style="margin-top:16px">
@@ -1312,12 +1314,12 @@ def analytics_setups(account_id: str | None = Query(default=None), range_code: s
 @app.get("/analytics/time", response_class=HTMLResponse)
 def analytics_time(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
     def render(current: list[Trade], curve: list[book.EquityPoint], selected: Account | None, opening: Decimal) -> str:
-        weekday = sorted(book.group_by(current, lambda trade: trade.opened_at.strftime("%A")), key=lambda group: WEEKDAYS.index(group.key))
-        hour = sorted(book.group_by(current, lambda trade: f"{trade.opened_at.hour:02d}:00"), key=lambda group: group.key)
+        weekday = sorted(book.group_by(current, lambda trade: localtime.local(trade.opened_at).strftime("%A")), key=lambda group: WEEKDAYS.index(group.key))
+        hour = sorted(book.group_by(current, lambda trade: f"{localtime.local(trade.opened_at).hour:02d}:00"), key=lambda group: group.key)
         return f"""
           <section class="grid two-col">
             <div class="card"><div class="card-title"><h2>Day of week</h2></div>{heatmap(group_rows(weekday))}</div>
-            <div class="card"><div class="card-title"><h2>Hour of day</h2><span class="meta">UTC</span></div>{heatmap(group_rows(hour))}</div>
+            <div class="card"><div class="card-title"><h2>Hour of day</h2><span class="meta">{escape(localtime.fmt(datetime.now(UTC), "%Z"))}</span></div>{heatmap(group_rows(hour))}</div>
           </section>
         """
 
@@ -1383,7 +1385,7 @@ def import_settings() -> str:
             .limit(25)
         ).all() if account_ids else []
         history_rows = "".join(
-            f"""<tr><td>{escape(row.created_at.strftime("%Y-%m-%d %H:%M"))}</td><td>{escape(row.broker)}</td><td>{escape(row.sync_type.value)}</td><td><span class="badge">{escape(row.status.value)}</span></td><td>{escape(row.error_message or "")}</td></tr>"""
+            f"""<tr><td>{escape(localtime.fmt(row.created_at))}</td><td>{escape(row.broker)}</td><td>{escape(row.sync_type.value)}</td><td><span class="badge">{escape(row.status.value)}</span></td><td>{escape(row.error_message or "")}</td></tr>"""
             for row in history
         ) or '<tr><td colspan="5" class="muted">No imports have been run yet.</td></tr>'
         body = f"""
@@ -1514,14 +1516,14 @@ def uploads_page() -> str:
             select(Attachment).where(attachment_filter).order_by(Attachment.created_at.desc()).limit(100)
         ).all()
         trade_options = '<option value="">No linked trade</option>' + "".join(
-            f'<option value="{escape(trade.id)}">{escape(trade.instrument.symbol)} · {escape(trade.opened_at.strftime("%Y-%m-%d"))}</option>'
+            f'<option value="{escape(trade.id)}">{escape(trade.instrument.symbol)} · {escape(localtime.fmt(trade.opened_at, "%Y-%m-%d"))}</option>'
             for trade in trades
         )
         journal_options = '<option value="">No linked journal</option>' + "".join(
             f'<option value="{escape(journal.id)}">{escape(journal.title)}</option>' for journal in journals
         )
         attachment_rows = "".join(
-            f"""<tr><td><a class="pill" href="{escape(storage.display_url(row.url))}" target="_blank" rel="noopener">{escape(row.file_name)}</a></td><td>{row.file_size:,}</td><td>{escape(row.mime_type)}</td><td>{escape(row.created_at.strftime("%Y-%m-%d %H:%M"))}</td></tr>"""
+            f"""<tr><td><a class="pill" href="{escape(storage.display_url(row.url))}" target="_blank" rel="noopener">{escape(row.file_name)}</a></td><td>{row.file_size:,}</td><td>{escape(row.mime_type)}</td><td>{escape(localtime.fmt(row.created_at))}</td></tr>"""
             for row in attachments
         ) or '<tr><td colspan="4" class="muted">No uploads yet.</td></tr>'
         body = f"""
@@ -1616,8 +1618,8 @@ def closed_trade_rows(trades: list[Trade]) -> str:
     return "".join(
         f"""<tr>
           <td>{escape(trade.instrument.symbol)}</td>
-          <td>{escape(trade.opened_at.strftime("%Y-%m-%d"))}</td>
-          <td>{escape(trade.closed_at.strftime("%Y-%m-%d") if trade.closed_at else "")}</td>
+          <td>{escape(localtime.fmt(trade.opened_at, "%Y-%m-%d"))}</td>
+          <td>{escape(localtime.fmt(trade.closed_at, "%Y-%m-%d"))}</td>
           <td>{number(trade.metrics.total_quantity if trade.metrics else 0)}</td>
           <td>{money(trade.metrics.average_entry if trade.metrics else 0)}</td>
           <td>{money(trade.metrics.average_exit if trade.metrics else 0)}</td>
@@ -2094,7 +2096,7 @@ def community_page() -> str:
             select(PublicTradeShare).where(PublicTradeShare.user_id == user.id, PublicTradeShare.revoked_at.is_(None)).order_by(PublicTradeShare.created_at.desc()).limit(20)
         ).all()
         share_rows = "".join(
-            f"""<tr><td>{escape(share.title)}</td><td><a class="pill" href="/share/{escape(share.slug)}">/share/{escape(share.slug)}</a></td><td>{escape(share.created_at.strftime("%Y-%m-%d"))}</td></tr>"""
+            f"""<tr><td>{escape(share.title)}</td><td><a class="pill" href="/share/{escape(share.slug)}">/share/{escape(share.slug)}</a></td><td>{escape(localtime.fmt(share.created_at, "%Y-%m-%d"))}</td></tr>"""
             for share in shares
         ) or '<tr><td colspan="3" class="muted">No public trade shares yet.</td></tr>'
         profile_name = profile.display_name if profile else (user.name or "Demo Trader")
@@ -2223,14 +2225,14 @@ def mentor_page() -> str:
             f'<option value="{escape(access.id)}">{escape(access.mentor_name or access.mentor_email)}</option>' for access in accesses if access.status == MentorAccessStatus.ACTIVE
         )
         trade_options = "".join(
-            f'<option value="{escape(trade.id)}">{escape(trade.instrument.symbol)} · {escape(trade.opened_at.strftime("%Y-%m-%d"))}</option>' for trade in trades
+            f'<option value="{escape(trade.id)}">{escape(trade.instrument.symbol)} · {escape(localtime.fmt(trade.opened_at, "%Y-%m-%d"))}</option>' for trade in trades
         )
         access_rows = "".join(
             f"""<tr><td>{escape(access.mentor_name or "")}</td><td>{escape(access.mentor_email)}</td><td><span class="badge">{escape(access.status.value)}</span></td><td>{'Yes' if access.can_view_journals else 'No'}</td><td>{'Yes' if access.can_comment else 'No'}</td></tr>"""
             for access in accesses
         ) or '<tr><td colspan="5" class="muted">No mentors have been granted access.</td></tr>'
         comment_rows = "".join(
-            f"""<tr><td>{escape(comment.created_at.strftime("%Y-%m-%d %H:%M"))}</td><td>{escape(comment.body[:160])}</td><td>{escape(comment.trade_id or "")}</td></tr>"""
+            f"""<tr><td>{escape(localtime.fmt(comment.created_at))}</td><td>{escape(comment.body[:160])}</td><td>{escape(comment.trade_id or "")}</td></tr>"""
             for comment in comments
         ) or '<tr><td colspan="3" class="muted">No mentor comments yet.</td></tr>'
         body = f"""

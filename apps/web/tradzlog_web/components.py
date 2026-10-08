@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 
 from tradzlog_db.models import Account, Direction, Execution, ExecutionType, Trade
 from tradzlog_web.book import RANGES, EquityPoint, Group, Period, pnl, r_multiple
+from tradzlog_web.localtime import local
 from tradzlog_web.ui import empty_state, side_badge, status_badge
 
 ZERO = Decimal("0")
@@ -61,6 +62,7 @@ def tone(value: Decimal | int | float | None) -> str:
 def short_datetime(value: datetime | None, today: date, with_time: bool = True) -> str:
     if value is None:
         return "—"
+    value = local(value)
     label = f"{value:%b} {value.day}"
     if value.year != today.year:
         label += value.strftime(" %Y")

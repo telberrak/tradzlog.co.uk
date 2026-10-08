@@ -330,3 +330,46 @@ def test_users_cannot_change_each_others_accounts() -> None:
         assert account.name != "hijacked" and account.archived_at is None
     finally:
         db.close()
+
+
+def test_profile_timezone_drives_dates_and_form_times(client) -> None:
+    from tradzlog_db.models import Execution, Trade, User
+
+    email = sign_up(client, "Londoner")
+    token = csrf_from(client.get("/settings/profile").text)
+    assert "Europe/London" in client.get("/settings/profile").text
+    bad = client.post("/settings/profile", data={"csrf_token": token, "name": "Londoner", "timezone": "Mars/Base"}, follow_redirects=False)
+    assert "error=" in bad.headers["location"]
+    saved = client.post("/settings/profile", data={"csrf_token": token, "name": "Lon Doner", "timezone": "Europe/London"}, follow_redirects=False)
+    assert "message=" in saved.headers["location"]
+
+    # An account and an instrument, then a trade typed in London time just after midnight.
+    client.post("/settings/accounts", data={"csrf_token": token, "name": "Main", "broker": "B", "account_type": "LIVE", "currency": "USD",
+        "starting_balance": "1000", "prop_firm_name": "", "max_daily_loss": "", "max_total_loss": "", "daily_profit_target": ""})
+    symbol = f"L{uuid4().hex[:5].upper()}"
+    client.post("/settings/instruments", data={"csrf_token": token, "symbol": symbol, "name": "Tz test", "asset_class": "STOCK",
+        "point_value": "1", "tick_size": "", "currency": "USD", "exchange": ""})
+    form_page = client.get("/trades/new").text
+    assert "Opened (Europe/London)" in form_page
+    account_id = re.search(r'name="account_id" required><option value="([^"]+)"', form_page).group(1)
+    instrument_id = re.search(rf'<option value="([^"]+)" data-pv="[^"]*">{symbol} ', form_page).group(1)
+    created = client.post("/trades/new", data={"csrf_token": token, "account_id": account_id, "instrument_id": instrument_id,
+        "direction": "LONG", "opened_at": "2026-07-01T00:10", "entry_price": "10", "quantity": "1", "planned_stop": "", "planned_target": "",
+        "entry_fees": "0", "exit_price": "11", "closed_at": "2026-07-01T00:30", "exit_fees": "0", "setup_tag": "TZ", "timeframe": "", "notes": ""},
+        follow_redirects=False)
+    assert created.status_code == 303, created.text
+
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == email))
+        assert user.timezone == "Europe/London" and user.name == "Lon Doner"
+        trade = db.scalar(select(Trade).where(Trade.user_id == user.id))
+        assert trade.closed_at == datetime(2026, 6, 30, 23, 30, tzinfo=UTC)  # stored in UTC
+        assert db.scalar(select(Execution.executed_at).where(Execution.trade_id == trade.id).order_by(Execution.executed_at)) == datetime(2026, 6, 30, 23, 10, tzinfo=UTC)
+    finally:
+        db.close()
+
+    # Shown and grouped on the London day.
+    assert symbol in client.get("/journal?day=2026-07-01").text
+    assert symbol not in client.get("/journal?day=2026-06-30").text
+    assert "Jul 1 00:10" in client.get("/trades?range=ALL").text

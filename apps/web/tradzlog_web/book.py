@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from tradzlog_db.models import Trade
+from tradzlog_web.localtime import local_date
 
 ZERO = Decimal("0")
 
@@ -57,7 +58,11 @@ def r_multiple(trade: Trade) -> Decimal | None:
 
 
 def closed_day(trade: Trade) -> date | None:
-    return trade.closed_at.date() if trade.closed_at is not None else None
+    return local_date(trade.closed_at) if trade.closed_at is not None else None
+
+
+def opened_day(trade: Trade) -> date:
+    return local_date(trade.opened_at)
 
 
 @dataclass(frozen=True)

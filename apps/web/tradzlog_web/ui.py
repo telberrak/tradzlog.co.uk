@@ -462,6 +462,7 @@ def shell(
               <summary class="avatar" aria-label="Account menu for {escape(user_name)}">{initials}</summary>
               <div class="user-menu-panel">
                 <div class="user-menu-name">{escape(user_name)}</div>
+                <a href="/settings/profile">Profile</a>
                 <a href="/settings/accounts">Trading accounts</a>
                 <a href="/settings/security">Security</a>
                 <form method="post" action="/logout"><button type="submit">Sign out</button></form>

@@ -24,7 +24,8 @@ from starlette.concurrency import run_in_threadpool
 from tradzlog_api.config import settings
 from tradzlog_db.models import User, WebSession
 from tradzlog_db.session import SessionLocal
-from tradzlog_web.context import CURRENT_CSRF, CURRENT_USER_ID
+from tradzlog_web.context import CURRENT_CSRF, CURRENT_TZ, CURRENT_USER_ID
+from tradzlog_web.localtime import zone
 
 SESSION_LIFETIME = timedelta(days=30)
 REFRESH_AFTER = timedelta(hours=1)
@@ -94,20 +95,23 @@ def end_session(db, request: Request, response: Response) -> None:
     response.delete_cookie(cookie_name(), path="/", secure=cookie_secure(), httponly=True, samesite="lax")
 
 
-def lookup_session(raw: str) -> tuple[str, str] | None:
-    """(user id, token hash) for a live session, sliding its expiry; None if unknown or expired."""
+def lookup_session(raw: str) -> tuple[str, str, str | None] | None:
+    """(user id, token hash, timezone) for a live session, sliding its expiry; None if unknown or expired."""
     token_hash = hash_token(raw)
     now = datetime.now(UTC)
     db = SessionLocal()
     try:
-        row = db.scalar(select(WebSession).where(WebSession.token_hash == token_hash))
-        if row is None or row.expires_at <= now:
+        found = db.execute(
+            select(WebSession, User.timezone).join(User, User.id == WebSession.user_id).where(WebSession.token_hash == token_hash)
+        ).first()
+        if found is None or found[0].expires_at <= now:
             return None
+        row, timezone = found
         if now - row.last_seen_at >= REFRESH_AFTER:
             row.last_seen_at = now
             row.expires_at = now + SESSION_LIFETIME
             db.commit()
-        return row.user_id, token_hash
+        return row.user_id, token_hash, timezone
     finally:
         db.close()
 
@@ -126,14 +130,17 @@ async def web_auth(request: Request) -> None:
     """App-wide dependency: identify the visitor and enforce CSRF on every POST."""
     CURRENT_USER_ID.set(None)
     CURRENT_CSRF.set(None)
+    CURRENT_TZ.set(UTC)
     request.state.session_token_hash = None
     raw = request.cookies.get(cookie_name())
     if raw:
         found = await run_in_threadpool(lookup_session, raw)
         if found is not None:
-            user_id, token_hash = found
+            user_id, token_hash, timezone = found
             CURRENT_USER_ID.set(user_id)
             CURRENT_CSRF.set(csrf_for(token_hash))
+            # Known before any handler code runs, so form times are always read in local time.
+            CURRENT_TZ.set(zone(timezone))
             request.state.session_token_hash = token_hash
 
     if request.method != "POST":
@@ -158,6 +165,7 @@ def current_user(db) -> User:
     user = db.scalar(select(User).where(User.id == user_id))
     if user is None:
         raise LoginRequired
+    CURRENT_TZ.set(zone(getattr(user, "timezone", None)))
     return user
 
 

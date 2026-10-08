@@ -29,6 +29,7 @@ from tradzlog_web.auth import (
     safe_next,
     start_session,
 )
+from tradzlog_web.localtime import timezone_names, valid_timezone
 from tradzlog_web.ui import auth_page, shell
 
 router = APIRouter()
@@ -121,8 +122,10 @@ def signup_form(name: str = "", email: str = "", error: str = "") -> str:
           <div class="field"><label for="password2">Repeat password</label>
             <input id="password2" name="password2" type="password" autocomplete="new-password" required /></div>
           {invite}
+          <input type="hidden" name="timezone" id="tz" value="UTC" />
           <button class="btn btn-primary" type="submit">Create account</button>
         </form>
+        <script>try {{ document.getElementById("tz").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"; }} catch (e) {{}}</script>
         <p class="switch">Already have an account? <a href="/login">Sign in</a></p>""",
     )
 
@@ -142,6 +145,7 @@ def signup_submit(
     password: str = Form(""),
     password2: str = Form(""),
     invite_code: str = Form(""),
+    timezone: str = Form("UTC"),
 ) -> HTMLResponse:
     problem = password_problem(password, password2)
     if "@" not in email or len(email) > 255:
@@ -158,6 +162,8 @@ def signup_submit(
             return HTMLResponse(
                 signup_form(name, email, "An account with this email already exists. Sign in instead."), status_code=409
             )
+        if valid_timezone(timezone):
+            user.timezone = timezone
         response = RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
         start_session(db, user, request, response)
         db.commit()
@@ -269,5 +275,58 @@ def sign_out_others(request: Request) -> RedirectResponse:
         sign_out_other_sessions(db, user.id, request.state.session_token_hash)
         db.commit()
         return security_redirect(message="Other devices have been signed out.")
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------- profile
+
+
+@router.get("/settings/profile", response_class=HTMLResponse)
+def profile_page(message: str = Query(default=""), error: str = Query(default="")) -> str:
+    db = SessionLocal()
+    try:
+        user = current_user(db)
+        options = "".join(
+            f'<option value="{escape(name)}" {"selected" if name == user.timezone else ""}>{escape(name.replace("_", " "))}</option>'
+            for name in timezone_names()
+        )
+        notice = (f'<p class="form-ok">{escape(message)}</p>' if message else "") + error_box(error)
+        body = f"""
+          {notice}
+          <form class="card" method="post" action="/settings/profile" style="display:grid;gap:14px;max-width:560px">
+            <div class="card-title"><h2>Profile</h2></div>
+            <div class="field"><label for="name">Name</label><input id="name" name="name" maxlength="120" value="{escape(user.name or "")}" /></div>
+            <div class="field"><label>Email</label><input value="{escape(user.email)}" disabled /></div>
+            <div class="field"><label for="timezone">Timezone</label><select id="timezone" name="timezone">{options}</select>
+              <p class="hint" id="tz-hint">Dates, the P&amp;L calendar, date ranges and times you enter use this timezone.</p></div>
+            <div class="actions"><button class="btn btn-primary" type="submit">Save profile</button>
+              <button class="btn" type="button" id="tz-detect">Use this device's timezone</button></div>
+          </form>
+          <script>
+            (function () {{
+              var button = document.getElementById("tz-detect"), select = document.getElementById("timezone");
+              var detected; try {{ detected = Intl.DateTimeFormat().resolvedOptions().timeZone; }} catch (e) {{}}
+              if (!detected || !select.querySelector('option[value="' + detected + '"]')) {{ button.hidden = true; return; }}
+              button.textContent = "Use this device's timezone (" + detected.replace(/_/g, " ") + ")";
+              button.addEventListener("click", function () {{ select.value = detected; }});
+            }})();
+          </script>"""
+        return shell("Profile", "settings", body, "Settings", user.name or user.email)
+    finally:
+        db.close()
+
+
+@router.post("/settings/profile")
+def save_profile(name: str = Form(""), timezone: str = Form("UTC")) -> RedirectResponse:
+    db = SessionLocal()
+    try:
+        user = current_user(db)
+        if not valid_timezone(timezone):
+            return RedirectResponse(f"/settings/profile?error={quote('Choose a timezone from the list.')}", status_code=status.HTTP_303_SEE_OTHER)
+        user.name = name.strip()[:120] or None
+        user.timezone = timezone
+        db.commit()
+        return RedirectResponse(f"/settings/profile?message={quote('Profile saved.')}", status_code=status.HTTP_303_SEE_OTHER)
     finally:
         db.close()

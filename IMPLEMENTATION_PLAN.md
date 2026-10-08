@@ -88,9 +88,10 @@ screenshot, `/api/health` is green in an uptime monitor, and a nightly backup ha
 
 **Status:** first step done (8 October 2026): sessions, sign-in/up/out, `current_user` in every
 handler, CSRF on every form, security page, trading-account and instrument management, and
-database-backed tests (sign-in flows, CSRF, an isolation crawl proven to catch leaks). Still to do:
-timezone-aware ranges, profile page, removing the beta gate (an ops step, see docs/DEPLOY_AWS.md),
-optional Google sign-in.
+database-backed tests (sign-in flows, CSRF, an isolation crawl proven to catch leaks). Step 2:
+profile page and per-user timezone (sign-up detects it; dates, ranges, calendar, time-of-day
+analytics and form times all use it; stored in UTC). Still to do: removing the beta gate (an ops
+step, see docs/DEPLOY_AWS.md) and optional Google sign-in.
 
 **Approach:** server-side sessions for the web app (it is server-rendered), reusing the
 existing password hashing and one-time tokens. Keep JWT for the API.
