@@ -346,6 +346,27 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .date-range label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)}
 .date-range input[type=date]{height:30px;padding:0 8px;font-size:12px;width:auto}
 .date-range.active input[type=date]{border-color:var(--accent)}
+.close-form{display:flex;gap:6px;align-items:center;margin:0}
+.close-form input{width:96px;height:28px;padding:0 8px;font-size:12px}
+.close-form input[name=fees]{width:56px}
+/* journal */
+.journal-list{display:grid;gap:10px}
+.journal-card{display:flex;gap:16px;text-decoration:none;color:inherit;padding:16px}
+.journal-card:hover{border-color:var(--border-strong)}
+.journal-card h3{font-size:15px;margin:0 0 6px}
+.journal-card p{font-size:13px;color:var(--text-secondary);margin:0 0 10px;line-height:1.55}
+.journal-date{flex:0 0 56px;text-align:center;border-right:1px solid var(--border-subtle);padding-right:14px}
+.journal-date b{display:block;font-size:22px;line-height:1.1}
+.journal-date span{font-size:11px;color:var(--text-muted);text-transform:uppercase}
+.journal-tags{display:flex;flex-wrap:wrap;gap:6px}
+.journal-text{white-space:pre-wrap;line-height:1.7;color:var(--text-primary)}
+.facts{display:grid;grid-template-columns:auto 1fr;gap:8px 14px;margin:0;font-size:13px}
+.facts dt{color:var(--text-muted)}
+.facts dd{margin:0}
+.side-title{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin:18px 0 8px}
+.lessons{margin:0;padding-left:18px;font-size:13px;line-height:1.6}
+.journal-detail-main{grid-column:span 2}
+@media (max-width:720px){.journal-detail-main{grid-column:auto}}
 /* first-run guide on the dashboard */
 .onboarding{margin-bottom:14px}
 .onboarding-progress{height:6px;border-radius:999px;background:var(--bg-surface-alt);overflow:hidden;margin:0 0 16px}

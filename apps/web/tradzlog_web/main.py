@@ -76,7 +76,9 @@ from tradzlog_web.components import (
     kpi,
     money,
     number,
+    plain_number,
     pnl_calendar,
+    price,
     price_ladder,
     query_string,
     short_datetime,
@@ -930,48 +932,58 @@ def positions(account_id: str | None = Query(default=None)) -> str:
         if selected is not None:
             query = query.where(Trade.account_id == selected.id)
         trades = session.scalars(query).all()
+        today = today_utc()
         rows = ""
         total_risk = Decimal("0")
         largest_risk = Decimal("0")
+        no_stop = 0
         for trade in trades:
             metrics = trade.metrics
             entry = metrics.average_entry if metrics else trade.planned_entry or Decimal("0")
             quantity = metrics.total_quantity if metrics else Decimal("0")
-            risk = abs(entry - trade.planned_stop) * quantity if trade.planned_stop is not None else Decimal("0")
-            total_risk += risk
-            largest_risk = max(largest_risk, risk)
-            rows += f"""
-              <tr>
-                <td><a class="pill" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)}</a></td>
-                <td>{escape(trade.account.name)}</td>
+            point_value = trade.instrument.point_value or Decimal("1")
+            if trade.planned_stop is None:
+                no_stop += 1
+                risk_cell = '<span class="badge badge-short">No stop</span>'
+            else:
+                risk = abs(entry - trade.planned_stop) * quantity * point_value
+                total_risk += risk
+                largest_risk = max(largest_risk, risk)
+                risk_cell = money(risk)
+            tid = escape(trade.id)
+            rows += f"""<tr data-href="/trades/{tid}">
+                <td><a href="/trades/{tid}"><b>{escape(trade.instrument.symbol)}</b></a></td>
+                {"" if selected else f'<td class="muted">{escape(trade.account.name)}</td>'}
                 <td>{side_badge(trade.direction.value)}</td>
-                <td>{money(entry)}</td>
-                <td>{number(quantity)}</td>
-                <td>{money(risk)}</td>
-                <td>{escape(localtime.fmt(trade.opened_at))}</td>
-                <td>
-                  <form method="post" action="/positions/{escape(trade.id)}/close" style="display:flex;gap:8px;align-items:center">
-                    <input aria-label="Exit price" name="exit_price" type="number" step="0.00000001" placeholder="Exit" required style="max-width:110px" />
-                    <input aria-label="Exit fees" name="fees" type="number" step="0.01" value="0" style="max-width:84px" />
-                    <button type="submit">Close</button>
-                  </form>
-                </td>
-              </tr>
-            """
-        if not rows:
-            rows = '<tr><td colspan="8" class="muted">No open positions. Open trades will appear here.</td></tr>'
+                <td class="num">{price(entry)}</td>
+                <td class="num">{plain_number(quantity)}</td>
+                <td class="num">{price(trade.planned_stop)}</td>
+                <td class="num">{risk_cell}</td>
+                <td class="muted">{short_datetime(trade.opened_at, today)}</td>
+                <td><form class="close-form" method="post" action="/positions/{tid}/close">
+                    <input aria-label="Exit price" name="exit_price" inputmode="decimal" placeholder="Exit price" required />
+                    <input aria-label="Exit fees" name="fees" inputmode="decimal" value="0" title="Fees" />
+                    <button class="btn btn-sm" type="submit">Close</button>
+                  </form></td>
+              </tr>"""
         scope = selected.name if selected else "All accounts"
+        table = (
+            f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Symbol</th>{"" if selected else "<th>Account</th>"}<th>Side</th>
+              <th class="num">Avg entry</th><th class="num">Size</th><th class="num">Stop</th><th class="num">Risk to stop</th><th>Opened</th><th>Close at</th></tr></thead>
+              <tbody>{rows}</tbody></table></div>"""
+            if rows else empty_state("No open positions", "Open trades appear here with their risk to stop, ready to close.", "/trades/new", "Log a trade")
+        )
         body = f"""
           <div class="filter-bar">{account_picker("/positions", accounts, selected.id if selected else None)}</div>
-          <section class="grid kpis">
-            {kpi_card("Open Positions", str(len(trades)), "neutral", scope)}
-            {kpi_card("Total Planned Risk", money(total_risk), "amber" if total_risk else "neutral", "Entry vs stop")}
-            {kpi_card("Largest Risk", money(largest_risk), "neutral", "Single position")}
-            {kpi_card("Quick Close", "Enabled", "positive", "Manual exit price")}
+          <section class="kpi-row">
+            {kpi("Open positions", str(len(trades)), "", scope)}
+            {kpi("Total risk to stop", money(total_risk), "negative" if total_risk else "", "If every stop is hit")}
+            {kpi("Largest single risk", money(largest_risk), "", "One position")}
+            {kpi("Without a stop", str(no_stop), "negative" if no_stop else "", "Unlimited risk" if no_stop else "All protected")}
           </section>
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Open Positions</div><h2 style="margin:4px 0 0">Live Risk Board</h2></div><a class="pill primary" href="/trades/new">New Trade</a></div>
-            <table><thead><tr><th>Symbol</th><th>Account</th><th>Side</th><th>Entry</th><th>Size</th><th>Risk</th><th>Opened</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
+          <section class="card">
+            <div class="card-title"><h2>Open positions</h2><a class="btn btn-sm btn-primary" href="/trades/new">Log trade</a></div>
+            {table}
           </section>
         """
         return shell("Positions", "positions", body, scope, user.name or user.email)
@@ -1057,6 +1069,25 @@ def plain_text_from_tiptap(content: dict[str, object]) -> str:
     return "\n".join(parts)
 
 
+JOURNAL_TYPES = {JournalType.TRADE_REVIEW: "Trade review", JournalType.DAILY: "Daily", JournalType.WEEKLY: "Weekly", JournalType.FREEFORM: "Notes"}
+MOODS = {1: "Rough", 2: "Off", 3: "Neutral", 4: "Good", 5: "Great"}
+
+
+def journal_card(entry: JournalEntry) -> str:
+    preview = plain_text_from_tiptap(entry.content).strip()
+    preview = preview[:220] + ("…" if len(preview) > 220 else "")
+    tags = [JOURNAL_TYPES[entry.type]]
+    if entry.mood:
+        tags.append(f"Mood {entry.mood} · {MOODS.get(entry.mood, '')}")
+    if entry.market_condition:
+        tags.append(entry.market_condition.value.replace("_", " ").title())
+    badges = "".join(f'<span class="badge">{escape(tag)}</span>' for tag in tags)
+    return f"""<a class="card journal-card" href="/journal/{escape(entry.id)}">
+      <div class="journal-date"><b>{entry.date.day}</b><span>{entry.date:%b %Y}</span></div>
+      <div><h3>{escape(entry.title)}</h3><p>{escape(preview)}</p><div class="journal-tags">{badges}</div></div>
+    </a>"""
+
+
 @app.get("/journal", response_class=HTMLResponse)
 def journal_feed(entry_type: str | None = Query(default=None), day: date | None = Query(default=None)) -> str:
     session = SessionLocal()
@@ -1082,38 +1113,29 @@ def journal_feed(entry_type: str | None = Query(default=None), day: date | None 
                 if book.opened_day(trade) == day or book.closed_day(trade) == day
             ]
             day_net = sum((book.pnl(trade) for trade in day_trades if book.closed_day(trade) == day), Decimal("0"))
-            day_panel = f"""<section class="card" style="margin-top:16px">
+            day_panel = f"""<section class="card" style="margin-bottom:14px">
               <div class="card-title"><h2>{day.strftime("%A, %B")} {day.day}</h2>
                 <span class="meta">Closed P&amp;L <b class="{tone(day_net)}">{money(day_net, signed=True)}</b></span></div>
               {trade_table(day_trades, today_utc(), empty='<p class="muted">No trades on this day.</p>')}
               <div class="actions" style="margin-top:12px"><a class="btn btn-primary" href="/journal/new?entry_type=DAILY&amp;entry_date={day.isoformat()}">Write daily journal</a>
               <a class="btn" href="/journal">All entries</a></div>
             </section>"""
-        filters = "".join(
-            f'<a class="pill {"primary" if entry_type == item.value else ""}" href="/journal?entry_type={item.value}">{item.value.replace("_", " ").title()}</a>'
-            for item in JournalType
+        tabs = filter_tabs(
+            [("All", "/journal", not entry_type)]
+            + [(JOURNAL_TYPES[item], f"/journal?entry_type={item.value}", entry_type == item.value) for item in JournalType]
         )
-        rows = ""
-        for entry in entries:
-            preview = plain_text_from_tiptap(entry.content)[:180]
-            rows += f"""
-              <article class="card">
-                <div class="section-head">
-                  <div><div class="label">{escape(entry.type.value.replace("_", " "))}</div><h2 style="margin:4px 0 0"><a class="pill" href="/journal/{escape(entry.id)}">{escape(entry.title)}</a></h2></div>
-                  <span class="badge">{escape(entry.date.isoformat())}</span>
-                </div>
-                <p class="muted">{escape(preview or "No preview available.")}</p>
-                <div class="actions"><span class="badge">Mood {entry.mood or "N/A"}</span><span class="badge">{escape(entry.market_condition.value if entry.market_condition else "No condition")}</span></div>
-              </article>
-            """
+        rows = "".join(journal_card(entry) for entry in entries)
         if not rows:
-            rows = '<section class="empty">No journal entries match this filter.</section>'
+            rows = empty_state(
+                "No journal entries yet" if not entry_type and not day else "Nothing matches this filter",
+                "Write about a trade or your day: what you saw, what you felt, what you'd repeat.",
+                "/journal/new", "Write an entry")
         body = f"""
           {day_panel}
-          <div class="actions" style="margin-top:16px"><a class="pill primary" href="/journal/new">New Journal</a><a class="pill" href="/journal">All</a>{filters}</div>
-          <section class="grid" style="margin-top:16px">{rows}</section>
+          <div class="filter-bar">{tabs}<a class="btn btn-primary" href="/journal/new">New entry</a></div>
+          <section class="journal-list">{rows}</section>
         """
-        return shell("Journal", "journal", body, "Journal Feed", user.name or user.email)
+        return shell("Journal", "journal", body, "Journal", user.name or user.email)
     except (SQLAlchemyError, ValueError) as exc:
         return shell("Journal", "journal", f'<section class="empty" style="margin-top:18px">{escape(str(exc))}</section>')
     finally:
@@ -1135,10 +1157,10 @@ def new_journal(
         if trade_id:
             trade = session.scalar(select(Trade).options(selectinload(Trade.instrument)).where(Trade.id == trade_id, Trade.user_id == user.id))
         type_options = "".join(
-            f'<option value="{item.value}" {"selected" if item.value == entry_type else ""}>{item.value.replace("_", " ").title()}</option>'
+            f'<option value="{item.value}" {"selected" if item.value == entry_type else ""}>{JOURNAL_TYPES[item]}</option>'
             for item in JournalType
         )
-        condition_options = '<option value="">Not specified</option>' + "".join(
+        condition_options = '<option value="">Not recorded</option>' + "".join(
             f'<option value="{item.value}">{item.value.replace("_", " ").title()}</option>' for item in MarketCondition
         )
         title = f"{trade.instrument.symbol} trade review" if trade else ""
@@ -1147,19 +1169,23 @@ def new_journal(
             if trade
             else "Day summary:\nKey decisions:\nWhat went well:\nWhat needs improvement:\nTomorrow's plan:"
         )
+        linked = (f'<p class="hint" style="margin:0">Linked to <a href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)} trade</a></p>'
+                  if trade else "")
+        moods = "".join(f'<option value="{n}">{n} · {label}</option>' for n, label in MOODS.items())
         body = f"""
-          <form class="card" style="margin-top:16px" method="post" action="/journal/new">
-            <input type="hidden" name="trade_id" value="{escape(trade_id or "")}" />
-            <div class="section-head"><div><div class="label">Structured Reflection</div><h2 style="margin:4px 0 0">New Journal Entry</h2></div><button class="primary" type="submit">Save Journal</button></div>
-            <div class="form-grid">
-              <div class="field"><label>Type</label><select name="entry_type">{type_options}</select></div>
-              <div class="field"><label>Date</label><input type="date" name="entry_date" value="{(entry_date or date.today()).isoformat()}" required /></div>
-              <div class="field"><label>Title</label><input name="title" value="{escape(title)}" required /></div>
-              <div class="field"><label>Mood</label><select name="mood"><option value="">N/A</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option></select></div>
-              <div class="field"><label>Market Condition</label><select name="market_condition">{condition_options}</select></div>
-              <div class="field"><label>Key Lessons</label><input name="key_lessons" placeholder="Separate lessons with semicolons" /></div>
+          <form class="card" method="post" action="/journal/new" style="display:grid;gap:14px;max-width:900px">
+            <input type="hidden" name="trade_id" value="{escape(trade.id if trade else "")}" />
+            <div class="card-title"><h2>New journal entry</h2>{linked}</div>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px">
+              <div class="field"><label for="j-type">Type</label><select id="j-type" name="entry_type">{type_options}</select></div>
+              <div class="field"><label for="j-date">Date</label><input id="j-date" type="date" name="entry_date" value="{(entry_date or localtime.today()).isoformat()}" required /></div>
+              <div class="field"><label for="j-mood">Mood</label><select id="j-mood" name="mood"><option value="">Not recorded</option>{moods}</select></div>
+              <div class="field"><label for="j-market">Market</label><select id="j-market" name="market_condition">{condition_options}</select></div>
             </div>
-            <div class="field" style="margin-top:14px"><label>Journal Content</label><textarea name="content" required>{escape(prompt)}</textarea></div>
+            <div class="field"><label for="j-title">Title</label><input id="j-title" name="title" value="{escape(title)}" maxlength="200" required /></div>
+            <div class="field"><label for="j-content">Notes</label><textarea id="j-content" name="content" rows="12" required>{escape(prompt)}</textarea></div>
+            <div class="field"><label for="j-lessons">Key lessons</label><input id="j-lessons" name="key_lessons" placeholder="Separate up to 5 lessons with semicolons" /></div>
+            <div class="actions"><button class="btn btn-primary" type="submit">Save entry</button><a class="btn btn-ghost" href="/journal">Cancel</a></div>
           </form>
         """
         return shell("New Journal", "journal", body, "Journal", user.name or user.email)
@@ -1226,27 +1252,27 @@ def journal_detail(journal_id: str) -> str:
             return shell("Journal Entry", "journal", '<section class="empty" style="margin-top:18px">No users found.</section>')
         entry = session.scalar(select(JournalEntry).where(JournalEntry.id == journal_id, JournalEntry.user_id == user.id))
         if entry is None:
-            return shell("Journal Entry", "journal", '<section class="empty" style="margin-top:18px">Journal entry not found.</section>', "Journal", user.name or user.email)
-        lessons = "".join(f"<li>{escape(lesson)}</li>" for lesson in entry.key_lessons) or "<li>No key lessons recorded.</li>"
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        trade = session.scalar(select(Trade).options(selectinload(Trade.instrument), selectinload(Trade.metrics))
+                               .where(Trade.id == entry.trade_id, Trade.user_id == user.id)) if entry.trade_id else None
+        lessons = "".join(f"<li>{escape(lesson)}</li>" for lesson in entry.key_lessons or [])
+        facts = [("Type", JOURNAL_TYPES[entry.type]), ("Date", f"{entry.date:%A %d %B %Y}"),
+                 ("Mood", f"{entry.mood} · {MOODS.get(entry.mood, '')}" if entry.mood else "Not recorded"),
+                 ("Market", entry.market_condition.value.replace("_", " ").title() if entry.market_condition else "Not recorded")]
+        facts_html = "".join(f"<dt>{label}</dt><dd>{escape(value)}</dd>" for label, value in facts)
+        trade_link = ""
+        if trade is not None:
+            value = book.pnl(trade)
+            result = f'<b class="{tone(value)}">{money(value, signed=True)}</b>' if trade.status == TradeStatus.CLOSED else ""
+            trade_link = f'<h3 class="side-title">Linked trade</h3><a class="btn btn-sm" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)} trade {result}</a>'
+        lessons_html = f'<h3 class="side-title">Key lessons</h3><ul class="lessons">{lessons}</ul>' if lessons else ""
         body = f"""
-          <section class="card" style="margin-top:16px">
-            <div class="section-head">
-              <div><div class="label">{escape(entry.type.value.replace("_", " "))}</div><h2 style="margin:4px 0 0">{escape(entry.title)}</h2></div>
-              <span class="badge">{escape(entry.date.isoformat())}</span>
-            </div>
-            <div class="grid two-col">
-              <div>
-                <div class="label">Reflection</div>
-                <p style="white-space:pre-wrap;line-height:1.65">{escape(plain_text_from_tiptap(entry.content))}</p>
-              </div>
-              <div>
-                <div class="label">Context</div>
-                <p class="muted">Mood: {entry.mood or "N/A"} · Market: {escape(entry.market_condition.value if entry.market_condition else "N/A")}</p>
-                <div class="label">Key Lessons</div>
-                <ul>{lessons}</ul>
-                {f'<a class="pill" href="/trades/{escape(entry.trade_id)}">View Linked Trade</a>' if entry.trade_id else ""}
-              </div>
-            </div>
+          <section class="grid two-col" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr));align-items:start">
+            <article class="card journal-detail-main">
+              <div class="card-title"><h2>{escape(entry.title)}</h2><a class="btn btn-sm btn-ghost" href="/journal">All entries</a></div>
+              <div class="journal-text">{escape(plain_text_from_tiptap(entry.content))}</div>
+            </article>
+            <aside class="card"><dl class="facts">{facts_html}</dl>{lessons_html}{trade_link}</aside>
           </section>
         """
         return shell(entry.title, "journal", body, "Journal", user.name or user.email)

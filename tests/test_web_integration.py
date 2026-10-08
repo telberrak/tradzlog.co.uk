@@ -863,3 +863,39 @@ def test_portfolio_shows_balance_with_cash_flows(client) -> None:
                                        "occurred_on": "2026-02-01", "note": ""})
     page = client.get("/dashboard/portfolio").text
     assert "$51,000.00" in page and "+$1,000.00" in page
+
+
+def test_journal_write_list_and_read(client) -> None:
+    email = sign_up(client, "Writer")
+    ids = seed_private_book(email, f"jr{uuid4().hex[:6]}")
+    token = csrf_from(client.get("/journal/new").text)
+    created = client.post("/journal/new", data={"csrf_token": token, "entry_type": "TRADE_REVIEW", "entry_date": "2026-03-04",
+                                                "title": "Faded the open", "content": "Waited for the pullback.\nGood patience.",
+                                                "trade_id": ids["trade_id"], "mood": "4", "market_condition": "",
+                                                "key_lessons": "wait for confirmation; size down"}, follow_redirects=False)
+    detail = client.get(created.headers["location"]).text
+    assert "Faded the open" in detail and "Waited for the pullback." in detail and "4 · Good" in detail
+    assert "wait for confirmation" in detail and f'href="/trades/{ids["trade_id"]}"' in detail
+    feed = client.get("/journal").text
+    assert "Faded the open" in feed and "Trade review" in feed
+    assert "Faded the open" not in client.get("/journal?entry_type=DAILY").text
+    with new_client() as other:
+        sign_up(other, "Other")
+        assert other.get(created.headers["location"]).status_code == 404
+
+
+def test_position_risk_uses_the_contract_point_value(client) -> None:
+    from tradzlog_db.models import Instrument, Trade
+
+    email = sign_up(client, "Futures")
+    ids = seed_private_book(email, f"fut{uuid4().hex[:6]}")  # long 10 @ 100
+    db = SessionLocal()
+    try:
+        trade = db.get(Trade, ids["trade_id"])
+        trade.planned_stop = Decimal("98")
+        db.get(Instrument, trade.instrument_id).point_value = Decimal("50")
+        db.commit()
+    finally:
+        db.close()
+    page = client.get("/positions").text
+    assert "$1,000.00" in page  # (100 - 98) x 10 x 50
