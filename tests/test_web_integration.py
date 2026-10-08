@@ -853,3 +853,13 @@ def test_from_to_dates_become_a_custom_range(client) -> None:
         assert 'name="from" value="2026-01-01"' in page and 'name="to" value="2026-03-31"' in page
     cleared = client.get("/trades?range=1M&from=&to=", follow_redirects=False)
     assert cleared.headers["location"] == "/trades?range=1M"
+
+
+def test_portfolio_shows_balance_with_cash_flows(client) -> None:
+    sign_up(client, "Portfolio")
+    account_id, token = account_with_csrf(client)  # starting balance 50,000
+    assert "Started at $50,000.00" in client.get("/dashboard/portfolio").text
+    client.post("/transactions", data={"csrf_token": token, "account_id": account_id, "type": "DEPOSIT", "amount": "1000",
+                                       "occurred_on": "2026-02-01", "note": ""})
+    page = client.get("/dashboard/portfolio").text
+    assert "$51,000.00" in page and "+$1,000.00" in page

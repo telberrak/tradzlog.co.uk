@@ -438,78 +438,69 @@ def settings_home() -> RedirectResponse:
     return RedirectResponse("/settings/import", status_code=status.HTTP_303_SEE_OTHER)
 
 
-def portfolio_data() -> dict[str, object]:
-    session = SessionLocal()
-    try:
-        user = current_user(session)
-        if user is None:
-            return {"error": "No users found. Run `python prisma/seed.py` to load demo data."}
-        accounts = session.scalars(
-            select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None)).order_by(Account.created_at)
-        ).all()
-        return {
-            "user": user,
-            "summary": summary(session, user.id),
-            "accounts": [
-                {
-                    "account": account,
-                    "summary": summary(session, user.id, account.id),
-                }
-                for account in accounts
-            ],
-        }
-    except SQLAlchemyError as exc:
-        return {"error": str(exc)}
-    finally:
-        session.close()
+def account_card(account: Account, trades: list[Trade], flows: list[CashTransaction], today: date) -> str:
+    """One trading account: balance (starting + closed P&L + cash flows), results, prop-firm limits."""
+    closed = [trade for trade in trades if trade.status == TradeStatus.CLOSED]
+    result = book.stats(closed)
+    deposits = sum((flow.signed_amount for flow in flows), Decimal("0"))
+    balance = account.starting_balance + result.net_pnl + deposits
+    open_count = sum(1 for trade in trades if trade.status == TradeStatus.OPEN)
+    limits = ""
+    if account.max_daily_loss:
+        today_pnl = book.daily_pnl(closed).get(today, Decimal("0"))
+        used = min(max(-today_pnl, Decimal("0")) / account.max_daily_loss * 100, Decimal("100"))
+        limits += f"""<div class="limit"><div class="card-title" style="margin:10px 0 6px"><span class="meta">Daily loss limit used today</span>
+          <span class="meta">{number(used, "%")} of {money(account.max_daily_loss)}</span></div><div class="bar"><span style="width:{used}%"></span></div></div>"""
+    if account.max_total_loss:
+        drawdown = max(account.starting_balance - balance, Decimal("0"))
+        used = min(drawdown / account.max_total_loss * 100, Decimal("100"))
+        limits += f"""<div class="limit"><div class="card-title" style="margin:10px 0 6px"><span class="meta">Max loss limit used</span>
+          <span class="meta">{number(used, "%")} of {money(account.max_total_loss)}</span></div><div class="bar"><span style="width:{used}%"></span></div></div>"""
+    return f"""<article class="card">
+      <div class="card-title"><div><h2>{escape(account.name)}</h2><span class="meta">{escape(account.broker)} · {escape(account.account_type.value.replace("_", " ").title())} · {escape(account.currency)}</span></div>
+        <a class="btn btn-sm" href="/dashboard?account_id={escape(account.id)}">Dashboard</a></div>
+      <div class="kpi-row" style="margin:0">
+        {kpi("Balance", money(balance), "", f"Started at {money(account.starting_balance)}")}
+        {kpi("Net P&L", money(result.net_pnl, signed=True), tone(result.net_pnl), f"{result.trades} closed trades")}
+        {kpi("Win rate", number(result.win_rate, "%"), "", f"{open_count} open")}
+        {kpi("Deposits − withdrawals", money(deposits, signed=True), tone(deposits))}
+      </div>
+      {limits}
+    </article>"""
 
 
 @app.get("/dashboard/portfolio", response_class=HTMLResponse)
 def portfolio() -> str:
-    data = portfolio_data()
-    if "error" in data:
-        body = f'<section class="empty" style="margin-top:18px">{escape(str(data["error"]))}</section>'
-        return shell("Portfolio", "portfolio", body)
-    user = data["user"]
-    metrics = data["summary"]
-    account_cards = ""
-    for item in data["accounts"]:
-        account = item["account"]
-        account_summary = item["summary"]
-        utilisation = Decimal("0")
-        if account.max_daily_loss and account_summary["net_pnl"] < 0:
-            utilisation = min(abs(Decimal(account_summary["net_pnl"])) / account.max_daily_loss * Decimal("100"), Decimal("100"))
-        account_cards += f"""
-          <article class="card">
-            <div class="section-head">
-              <div><div class="label">{escape(account.account_type.value)}</div><h2 style="margin:4px 0 0">{escape(account.name)}</h2></div>
-              <a class="pill" href="/dashboard?account_id={escape(account.id)}">Open</a>
-            </div>
-            <div class="grid" style="grid-template-columns:repeat(3,1fr);gap:12px">
-              <div><div class="label">Net P&L</div><div class="kpi {tone(account_summary["net_pnl"])}">{money(account_summary["net_pnl"])}</div></div>
-              <div><div class="label">Win Rate</div><div class="kpi">{number(account_summary["win_rate"], "%")}</div></div>
-              <div><div class="label">Trades</div><div class="kpi">{account_summary["trades_count"]}</div></div>
-            </div>
-            <div style="margin-top:14px">
-              <div class="section-head" style="margin-bottom:6px"><span class="label">Daily Loss Utilisation</span><span class="small muted">{number(utilisation, "%")}</span></div>
-              <div class="bar"><span style="width:{utilisation}%"></span></div>
-            </div>
-          </article>
-        """
-    if not account_cards:
-        account_cards = '<section class="empty">No trading accounts yet. Create one during onboarding to activate the portfolio view.</section>'
-    body = f"""
-      <section class="grid kpis">
-        {kpi_card("Portfolio Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "All accounts")}
-        {kpi_card("Portfolio Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
-        {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "All strategies")}
-        {kpi_card("Total Trades", str(metrics["trades_count"]), "neutral", "Across accounts")}
-        {kpi_card("Avg R", number(metrics["average_r"], "R"), tone(metrics["average_r"]), "Book expectancy")}
-        {kpi_card("Avg Hold", number(Decimal(metrics["average_hold_seconds"]) / Decimal("3600"), "h"), "neutral", "Portfolio")}
-      </section>
-      <section class="grid accounts">{account_cards}</section>
-    """
-    return shell("Portfolio", "portfolio", body, "All Accounts", user.name or user.email)
+    session = SessionLocal()
+    try:
+        user = current_user(session)
+        accounts, _, trades = load_book(session, user, None)
+        if not accounts:
+            body = empty_state("No trading accounts yet", "Add a trading account to see its balance and results here.",
+                               "/settings/accounts", "Add a trading account")
+            return shell("Portfolio", "portfolio", body, "All accounts", user.name or user.email)
+        flows = load_cash_flows(session, accounts)
+        today = today_utc()
+        closed = [trade for trade in trades if trade.status == TradeStatus.CLOSED]
+        total = book.stats(closed)
+        balance = (sum((account.starting_balance for account in accounts), Decimal("0")) + total.net_pnl
+                   + sum((flow.signed_amount for flow in flows), Decimal("0")))
+        cards = "".join(
+            account_card(account, [trade for trade in trades if trade.account_id == account.id],
+                         [flow for flow in flows if flow.account_id == account.id], today)
+            for account in accounts
+        )
+        body = f"""
+          <section class="kpi-row">
+            {kpi("Total balance", money(balance), "", f"{len(accounts)} accounts")}
+            {kpi("Net P&L", money(total.net_pnl, signed=True), tone(total.net_pnl), f"{total.trades} closed trades")}
+            {kpi("Win rate", number(total.win_rate, "%"))}
+            {kpi("Profit factor", number(total.profit_factor) if total.profit_factor is not None else "—")}
+          </section>
+          <section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px">{cards}</section>"""
+        return shell("Portfolio", "portfolio", body, "All accounts", user.name or user.email)
+    finally:
+        session.close()
 
 
 TRADE_STATUS_TABS = (("All", None), ("Open", "OPEN"), ("Closed", "CLOSED"), ("Cancelled", "CANCELLED"))
