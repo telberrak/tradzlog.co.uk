@@ -23,7 +23,6 @@ from tradzlog_api.services.analytics import (
     summary,
 )
 from tradzlog_api.services.hardening import SECURITY_HEADERS, rate_limiter
-from tradzlog_api.services.imports import parse_broker_csv
 from tradzlog_api.services.metrics import compute_planned_rr, compute_trade_metrics
 from tradzlog_api.services.observability import (
     finish_request,
@@ -39,9 +38,6 @@ from tradzlog_db.models import (
     BillingInvoice,
     BillingStatus,
     BillingSubscription,
-    BrokerSync,
-    BrokerSyncStatus,
-    BrokerSyncType,
     Direction,
     Execution,
     ExecutionType,
@@ -81,6 +77,7 @@ from tradzlog_web.components import (
     tone,
     trade_table,
 )
+from tradzlog_web.import_routes import router as import_router
 from tradzlog_web.settings_routes import router as settings_router
 from tradzlog_web.ui import (
     coach_quality_badge,
@@ -106,6 +103,7 @@ app = FastAPI(
 )
 app.include_router(account_router)
 app.include_router(settings_router)
+app.include_router(import_router)
 
 
 @app.exception_handler(LoginRequired)
@@ -124,7 +122,6 @@ WEB_SENSITIVE_POSTS = {
     "/coaching/generate",
     "/coaching/chat",
     "/settings/import/preview",
-    "/settings/import/paste",
     "/settings/uploads",
     "/login",
     "/signup",
@@ -136,7 +133,7 @@ WEB_SENSITIVE_POSTS = {
     "/community/mentor/comments",
 }
 
-WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/")
+WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/", "/settings/import/")
 
 ALLOWED_UPLOAD_TYPES = set(storage.IMAGE_EXTENSIONS)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -1363,123 +1360,6 @@ def analytics_streaks(account_id: str | None = Query(default=None), range_code: 
         """
 
     return analytics_page("Streaks", "streaks", account_id, range_code, render)
-
-
-def account_options(accounts: list[Account]) -> str:
-    return "".join(f'<option value="{escape(account.id)}">{escape(account.name)} · {escape(account.broker)}</option>' for account in accounts)
-
-
-@app.get("/settings/import", response_class=HTMLResponse)
-def import_settings() -> str:
-    session = SessionLocal()
-    try:
-        user = current_user(session)
-        if user is None:
-            return shell("Import", "settings", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
-        accounts = session.scalars(select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None))).all()
-        account_ids = [account.id for account in accounts]
-        history = session.scalars(
-            select(BrokerSync)
-            .where(BrokerSync.account_id.in_(account_ids))
-            .order_by(BrokerSync.created_at.desc())
-            .limit(25)
-        ).all() if account_ids else []
-        history_rows = "".join(
-            f"""<tr><td>{escape(localtime.fmt(row.created_at))}</td><td>{escape(row.broker)}</td><td>{escape(row.sync_type.value)}</td><td><span class="badge">{escape(row.status.value)}</span></td><td>{escape(row.error_message or "")}</td></tr>"""
-            for row in history
-        ) or '<tr><td colspan="5" class="muted">No imports have been run yet.</td></tr>'
-        body = f"""
-          <section class="grid two-col">
-            <form class="card" style="margin-top:16px" method="post" action="/settings/import/preview" enctype="multipart/form-data">
-              <div class="section-head"><div><div class="label">Broker CSV</div><h2 style="margin:4px 0 0">Upload and Preview</h2></div><button class="primary" type="submit">Parse CSV</button></div>
-              <div class="field"><label>Account</label><select name="account_id" required>{account_options(accounts)}</select></div>
-              <div class="field" style="margin-top:12px"><label>Broker Format</label><select name="broker_format"><option>Generic CSV</option><option>IBKR Activity Statement</option><option>TD Ameritrade</option><option>TradeStation</option><option>NinjaTrader</option><option>MT4/MT5</option></select></div>
-              <div class="field" style="margin-top:12px"><label>CSV File</label><input type="file" name="file" accept=".csv,text/csv" required /></div>
-              <p class="muted small">Supported columns include symbol, datetime, side, price, quantity, fees, and order id. Common broker aliases are normalized automatically.</p>
-            </form>
-            <section class="card" style="margin-top:16px">
-              <div class="section-head"><div><div class="label">Manual Bulk Entry</div><h2 style="margin:4px 0 0">Spreadsheet Paste</h2></div></div>
-              <form method="post" action="/settings/import/paste">
-                <div class="field"><label>Account</label><select name="account_id" required>{account_options(accounts)}</select></div>
-                <div class="field" style="margin-top:12px"><label>Tab-Separated Rows</label><textarea name="rows" placeholder="symbol\tdatetime\tside\tprice\tquantity\tfees"></textarea></div>
-                <button style="margin-top:12px" type="submit">Preview Paste</button>
-              </form>
-            </section>
-          </section>
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Import History</div><h2 style="margin:4px 0 0">Broker Syncs</h2></div></div>
-            <table><thead><tr><th>Created</th><th>Broker</th><th>Type</th><th>Status</th><th>Error</th></tr></thead><tbody>{history_rows}</tbody></table>
-          </section>
-        """
-        return shell("Import", "settings", body, "Settings", user.name or user.email)
-    finally:
-        session.close()
-
-
-@app.post("/settings/import/preview", response_class=HTMLResponse)
-async def import_preview(
-    account_id: str = Form(...),
-    broker_format: str = Form("Generic CSV"),
-    file: UploadFile = File(...),
-) -> str:
-    session = SessionLocal()
-    try:
-        user = current_user(session)
-        if user is None:
-            raise HTTPException(status_code=400, detail="No demo user available")
-        account = session.scalar(select(Account).where(Account.id == account_id, Account.user_id == user.id))
-        if account is None:
-            raise HTTPException(status_code=404, detail="Account not found")
-        raw = await file.read()
-        rows = parse_broker_csv(raw)
-        broker_ids = [row.broker_id for row in rows if row.broker_id]
-        existing_broker_ids = set(
-            session.scalars(select(Execution.broker_id).where(Execution.broker_id.in_(broker_ids))).all()
-        ) if broker_ids else set()
-        sync = BrokerSync(
-            account_id=account.id,
-            broker=broker_format or account.broker,
-            sync_type=BrokerSyncType.CSV,
-            last_sync_at=datetime.now(UTC),
-            status=BrokerSyncStatus.SUCCESS,
-            error_message=None,
-        )
-        session.add(sync)
-        session.commit()
-        preview_rows = "".join(
-            f"""<tr><td>{escape(row.symbol)}</td><td>{escape(row.executed_at.strftime("%Y-%m-%d %H:%M"))}</td><td>{escape(row.side or "N/A")}</td><td>{money(row.price)}</td><td>{number(row.quantity)}</td><td>{money(row.fees)}</td><td>{escape(row.broker_id or "")}</td><td>{"Duplicate" if row.broker_id in existing_broker_ids else "New"}</td></tr>"""
-            for row in rows[:100]
-        ) or '<tr><td colspan="8" class="muted">No valid execution rows were found.</td></tr>'
-        body = f"""
-          <div class="actions" style="margin-top:16px"><a class="pill" href="/settings/import">Back to Import</a><span class="badge">{len(rows)} matched rows</span><span class="badge">{len(existing_broker_ids)} duplicate broker IDs</span></div>
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Preview</div><h2 style="margin:4px 0 0">{escape(file.filename or "CSV Import")}</h2></div><span class="badge">Sync {escape(sync.id[:8])}</span></div>
-            <table><thead><tr><th>Symbol</th><th>Time</th><th>Side</th><th>Price</th><th>Qty</th><th>Fees</th><th>Broker ID</th><th>Status</th></tr></thead><tbody>{preview_rows}</tbody></table>
-          </section>
-        """
-        return shell("Import Preview", "settings", body, account.name, user.name or user.email)
-    except Exception as exc:
-        if "account" in locals():
-            session.add(
-                BrokerSync(
-                    account_id=account.id,
-                    broker=broker_format,
-                    sync_type=BrokerSyncType.CSV,
-                    last_sync_at=datetime.now(UTC),
-                    status=BrokerSyncStatus.FAILED,
-                    error_message=str(exc),
-                )
-            )
-            session.commit()
-        raise
-    finally:
-        session.close()
-
-
-@app.post("/settings/import/paste")
-def paste_preview(account_id: str = Form(...), rows: str = Form("")) -> RedirectResponse:
-    del account_id, rows
-    return RedirectResponse("/settings/import", status_code=status.HTTP_303_SEE_OTHER)
 
 
 def validate_upload(file: UploadFile) -> None:

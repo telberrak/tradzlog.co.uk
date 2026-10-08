@@ -8,3 +8,6 @@
 *.json text eol=lf
 Dockerfile text eol=lf
 .env.example text eol=lf
+
+# Broker export samples are kept byte-for-byte (line endings and encodings are part of the test).
+tests/fixtures/** -text

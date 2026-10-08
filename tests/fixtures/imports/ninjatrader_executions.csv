@@ -1,0 +1,3 @@
+Instrument,Action,Quantity,Price,Time,ID,E/X,Position,Order ID,Name,Commission,Rate,Account,Connection
+NQ 03-26,Buy,1,18000.00,3/2/2026 9:31:22 AM,a1,Entry,1 L,o1,Buy,$2.04,1,Sim101,Live
+NQ 03-26,Sell,1,18010.50,3/2/2026 9:45:01 AM,a2,Exit,-,o2,Sell,$2.04,1,Sim101,Live

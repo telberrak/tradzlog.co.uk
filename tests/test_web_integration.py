@@ -373,3 +373,113 @@ def test_profile_timezone_drives_dates_and_form_times(client) -> None:
     assert symbol in client.get("/journal?day=2026-07-01").text
     assert symbol not in client.get("/journal?day=2026-06-30").text
     assert "Jul 1 00:10" in client.get("/trades?range=ALL").text
+
+
+# --------------------------------------------------------------------- broker import
+
+FIXTURE_DIR = ROOT / "tests" / "fixtures" / "imports"
+
+
+def account_with_csrf(client, name: str = "IBKR") -> tuple[str, str]:
+    token = csrf_from(client.get("/dashboard").text)
+    client.post("/settings/accounts", data={"csrf_token": token, "name": name, "broker": "Interactive Brokers", "account_type": "LIVE",
+        "currency": "USD", "starting_balance": "50000", "prop_firm_name": "", "max_daily_loss": "", "max_total_loss": "", "daily_profit_target": ""})
+    page = client.get("/settings/import").text
+    account_id = re.search(r'name="account_id" required><option value="([^"]+)"', page).group(1)
+    return account_id, csrf_from(page)
+
+
+def upload(client, token: str, account_id: str, name: str, content: bytes, tz: str = "America/New_York") -> str:
+    response = client.post("/settings/import/preview", data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": tz},
+                           files={"file": (name, content, "text/csv")}, follow_redirects=False)
+    assert response.status_code == 303, response.text
+    location = response.headers["location"]
+    assert "error=" not in location, location
+    return location.rsplit("/", 1)[1]
+
+
+def test_broker_import_preview_confirm_reimport_and_undo(client) -> None:
+    from tradzlog_db.models import Instrument, Trade, TradeStatus
+
+    email = sign_up(client, "Importer")
+    account_id, token = account_with_csrf(client)
+    raw = (FIXTURE_DIR / "ibkr_flex_trades.csv").read_bytes()
+
+    first = upload(client, token, account_id, "flex.csv", raw)
+    preview = client.get(f"/settings/import/{first}").text
+    assert "Waiting for confirmation" in preview and "Import 6 fills into IBKR" in preview
+    assert "Interactive Brokers (Flex Query: Trades)" in preview and "1 non-trade rows skipped" in preview
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Trade.id).join(Trade.account).where(Trade.account_id == account_id)) is None  # preview writes nothing
+    finally:
+        db.close()
+
+    done = client.post(f"/settings/import/{first}/confirm", data={"csrf_token": token}, follow_redirects=False)
+    assert "message=" in done.headers["location"]
+    summary = client.get(f"/settings/import/{first}").text
+    assert "Imported" in summary and "Undo this import" in summary
+
+    db = SessionLocal()
+    try:
+        trades = {t.instrument.symbol: t for t in db.scalars(select(Trade).where(Trade.account_id == account_id)).all()}
+        assert set(trades) == {"AAPL", "ESH6", "EURUSD"}
+        assert trades["AAPL"].status == TradeStatus.CLOSED and trades["AAPL"].metrics.realized_pnl == Decimal("347.0000")
+        assert trades["ESH6"].direction.value == "SHORT" and trades["ESH6"].metrics.realized_pnl == Decimal("991.6000")
+        assert trades["EURUSD"].status == TradeStatus.OPEN
+        assert db.scalar(select(Instrument.point_value).where(Instrument.symbol == "ESH6")) == Decimal("50")
+    finally:
+        db.close()
+
+    # The same file again: everything is a duplicate, nothing to import.
+    again = upload(client, token, account_id, "flex-again.csv", raw)
+    page = client.get(f"/settings/import/{again}").text
+    assert "Nothing new to import" in page and "6 already imported" in page
+    assert "message=" in client.post(f"/settings/import/{again}/discard", data={"csrf_token": token}, follow_redirects=False).headers["location"]
+
+    # A later file closes the forex position the first import left open.
+    second = upload(client, token, account_id, "close-fx.csv", b"Symbol,Date/Time,Side,Quantity,Price,Commission\nEURUSD,2026-03-05 10:00,SELL,0.2,1.0900,2\n")
+    assert "1 continued" in client.get(f"/settings/import/{second}").text
+    client.post(f"/settings/import/{second}/confirm", data={"csrf_token": token})
+    db = SessionLocal()
+    try:
+        fx = db.scalar(select(Trade).join(Instrument).where(Trade.account_id == account_id, Instrument.symbol == "EURUSD"))
+        assert fx.status == TradeStatus.CLOSED and fx.metrics.realized_pnl == Decimal("96.0000")  # 0.005 x 0.2 lots x 100000 - 4
+    finally:
+        db.close()
+
+    # Undo goes newest first.
+    refused = client.post(f"/settings/import/{first}/undo", data={"csrf_token": token}, follow_redirects=False)
+    assert "Undo+the+newer" in refused.headers["location"] or "Undo%20the%20newer" in refused.headers["location"]
+    client.post(f"/settings/import/{second}/undo", data={"csrf_token": token})
+    db = SessionLocal()
+    try:
+        fx = db.scalar(select(Trade).join(Instrument).where(Trade.account_id == account_id, Instrument.symbol == "EURUSD"))
+        assert fx.status == TradeStatus.OPEN and fx.closed_at is None  # reopened
+    finally:
+        db.close()
+    client.post(f"/settings/import/{first}/undo", data={"csrf_token": token})
+    db = SessionLocal()
+    try:
+        assert db.scalars(select(Trade).where(Trade.account_id == account_id)).all() == []
+    finally:
+        db.close()
+
+    # Someone else can't see or act on these imports.
+    with new_client() as other:
+        sign_up(other, "Other")
+        other_token = csrf_from(other.get("/dashboard").text)
+        assert "Import not found" in other.get(f"/settings/import/{first}").text
+        assert "error=" in other.post(f"/settings/import/{first}/undo", data={"csrf_token": other_token}, follow_redirects=False).headers["location"]
+        assert email not in other.get("/settings/import").text
+
+
+def test_import_reports_unreadable_rows_and_rejects_bad_files(client) -> None:
+    sign_up(client)
+    account_id, token = account_with_csrf(client, "Generic")
+    batch = upload(client, token, account_id, "mixed.csv", b"Ticker,Date/Time,Qty,Price\nQQQ,2026-03-02 10:00,10,400\nQQQ,never,5,1\n")
+    page = client.get(f"/settings/import/{batch}").text
+    assert "1 rows couldn" in page and "Row 3" in page and "Import 1 fills" in page
+    bad = client.post("/settings/import/preview", data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": "UTC"},
+                      files={"file": ("x.csv", b"hello,world\n", "text/csv")}, follow_redirects=False)
+    assert "error=" in bad.headers["location"]

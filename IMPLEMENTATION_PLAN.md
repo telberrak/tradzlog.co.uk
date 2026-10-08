@@ -147,6 +147,14 @@ downgrades them at period end, and every limit is covered by a test.
 
 The feature that decides whether traders stay: nobody types in 200 trades.
 
+**Status:** step 1 done (8 October 2026): upload -> preview (nothing written) -> confirm -> summary;
+IBKR Flex, MT5 (CSV and HTML report), NinjaTrader, Tradovate and generic CSV with auto-detection
+and a file-timezone choice; FIFO round trips (scale in/out, flips, continuing open trades);
+per-account fingerprints so re-imports add nothing; new-instrument point values confirmed in the
+preview; broker vs TradzLog P&L check; undo (newest first). Still to do: validate with your real
+IBKR and MT5 exports, the column mapper for unknown formats, and background processing for very
+large files.
+
 **Tasks**
 
 1. **Confirm step:** turn the existing preview into real executions, grouped into round-trip

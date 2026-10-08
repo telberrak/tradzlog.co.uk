@@ -308,6 +308,8 @@ class Trade(TimestampMixin, Base):
     tags: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
     is_reviewed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     journal_entry_id: Mapped[str | None] = mapped_column(ForeignKey("journal_entries.id", use_alter=True))
+    # The import batch that opened this trade, if any (undoing the batch removes it).
+    import_batch_id: Mapped[str | None] = mapped_column(ForeignKey("broker_syncs.id", ondelete="SET NULL"), index=True)
 
     account: Mapped[Account] = relationship(back_populates="trades")
     user: Mapped[User] = relationship(back_populates="trades")
@@ -329,6 +331,10 @@ class Execution(TimestampMixin, Base):
     fees: Mapped[Decimal] = mapped_column(Numeric(18, 4), default=Decimal("0"), nullable=False)
     broker_id: Mapped[str | None] = mapped_column(String(120), index=True)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Set for fills that came from a file import: which batch, and a fingerprint of the source row
+    # (scoped to the account) so re-importing the same file adds nothing.
+    import_batch_id: Mapped[str | None] = mapped_column(ForeignKey("broker_syncs.id", ondelete="SET NULL"), index=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(64), index=True)
 
     trade: Mapped[Trade] = relationship(back_populates="executions")
 
@@ -467,6 +473,15 @@ class BrokerSync(TimestampMixin, Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     status: Mapped[BrokerSyncStatus] = mapped_column(Enum(BrokerSyncStatus), default=BrokerSyncStatus.PENDING, nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text)
+    # A file import is one batch: PENDING while previewed (rows held in ``payload``), SUCCESS once
+    # confirmed (counts in ``summary``), and ``undone_at`` set if it was rolled back.
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    file_format: Mapped[str | None] = mapped_column(String(40))
+    source_timezone: Mapped[str | None] = mapped_column(String(64))
+    payload: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    summary: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+    imported_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    undone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class PublicTradeShare(TimestampMixin, Base):
