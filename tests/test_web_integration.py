@@ -715,3 +715,41 @@ def test_deleting_an_account_removes_instruments_only_its_imports_created(client
         assert db.scalar(select(Instrument).where(Instrument.symbol == symbol)) is None
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------- onboarding
+
+
+def test_first_run_guide_tracks_progress_and_can_be_hidden(client) -> None:
+
+    sign_up(client, "Newcomer")
+    first = client.get("/dashboard").text
+    assert "Get started with TradzLog" in first and "0 of 3 steps done" in first
+    assert "Add a trading account first" in first and "Equity curve" not in first  # no empty charts
+    token = csrf_from(first)
+
+    client.post("/settings/profile", data={"csrf_token": token, "name": "Newcomer", "timezone": "Europe/London"})
+    account_with_csrf(client)
+    page = client.get("/dashboard").text
+    assert "2 of 3 steps done" in page and 'href="/settings/import"' in page and "Import from your broker" in page
+
+    hidden = client.post("/onboarding/dismiss", data={"csrf_token": token}, follow_redirects=False)
+    assert hidden.headers["location"] == "/dashboard"
+    after = client.get("/dashboard").text
+    assert "Get started with TradzLog" not in after and "No trades yet" in after
+
+
+def test_first_run_guide_finishes_itself_when_every_step_is_done(client) -> None:
+    from tradzlog_db.models import User
+
+    email = sign_up(client, "Finisher")
+    token = csrf_from(client.get("/dashboard").text)
+    client.post("/settings/profile", data={"csrf_token": token, "name": "Finisher", "timezone": "Europe/London"})
+    seed_private_book(email, f"done{uuid4().hex[:6]}")  # account, trade and journal entry
+    page = client.get("/dashboard").text
+    assert "Get started with TradzLog" not in page and "Equity curve" in page
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(User).where(User.email == email)).onboarded_at is not None
+    finally:
+        db.close()

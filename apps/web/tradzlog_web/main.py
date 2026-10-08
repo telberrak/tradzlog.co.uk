@@ -82,6 +82,8 @@ from tradzlog_web.components import (
     trade_table,
 )
 from tradzlog_web.import_routes import router as import_router
+from tradzlog_web.onboarding import checklist
+from tradzlog_web.onboarding import router as onboarding_router
 from tradzlog_web.public_routes import error_page, feature_gate, landing_page
 from tradzlog_web.public_routes import router as public_router
 from tradzlog_web.settings_routes import router as settings_router
@@ -113,6 +115,7 @@ app.include_router(account_router)
 app.include_router(settings_router)
 app.include_router(import_router)
 app.include_router(data_router)
+app.include_router(onboarding_router)
 
 
 @app.exception_handler(LoginRequired)
@@ -310,6 +313,14 @@ def render_dashboard(account_id: str | None = None, range_code: str | None = Non
         today = today_utc()
         period = book.resolve_period(range_code, today)
         accounts, selected, trades = load_book(session, user, account_id)
+        guide = checklist(session, user)
+        if not trades:
+            # Nothing to chart yet: the guide (or a pointer to it) instead of empty charts.
+            filters = filter_bar("/dashboard", accounts, selected.id if selected else None, period) if accounts else ""
+            nothing = "" if guide else empty_state(
+                "No trades yet", "Import a broker export or log a trade, and your dashboard fills in.",
+                "/settings/import" if accounts else "/settings/accounts", "Import trades" if accounts else "Add a trading account")
+            return shell("Dashboard", "dashboard", f"{filters}{guide}{nothing}", selected.name if selected else "All accounts", user.name or user.email)
         scope_accounts = [selected] if selected else accounts
         current = closed_in(trades, period)
         previous = book.stats(closed_in(trades, period, previous=True)) if period.previous_start else None
@@ -325,6 +336,7 @@ def render_dashboard(account_id: str | None = None, range_code: str | None = Non
         all_closed = [trade for trade in trades if trade.status == TradeStatus.CLOSED]
         body = f"""
           {filter_bar("/dashboard", accounts, account_param, period)}
+          {guide}
           {kpi_strip(current_stats, previous, book.max_drawdown_pct(curve), drawdown_note(selected))}
           <section class="dash-grid">
             <div class="card">

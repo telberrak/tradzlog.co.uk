@@ -341,6 +341,20 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .auth-card .switch{margin:16px 0 0;font-size:13px;color:var(--text-muted);text-align:center}
 .form-error{background:var(--danger-soft);color:var(--danger);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
 .form-ok{background:var(--success-soft);color:var(--success);border:1px solid rgba(16,185,129,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
+/* first-run guide on the dashboard */
+.onboarding{margin-bottom:14px}
+.onboarding-progress{height:6px;border-radius:999px;background:var(--bg-surface-alt);overflow:hidden;margin:0 0 16px}
+.onboarding-progress span{display:block;height:100%;background:var(--accent);border-radius:999px}
+.onboarding-steps{list-style:none;margin:0;padding:0;display:grid;gap:4px}
+.onboarding-steps li{display:flex;gap:12px;padding:10px 4px;border-top:1px solid var(--border-subtle)}
+.onboarding-steps li:first-child{border-top:0}
+.onboarding-steps h3{font-size:14px;margin:2px 0 4px}
+.onboarding-steps p{font-size:13px;color:var(--text-secondary);margin:0}
+.onboarding-steps li.done h3{color:var(--text-muted);text-decoration:line-through}
+.onboarding-steps li.done p{display:none}
+.step-mark{flex:0 0 26px;height:26px;border-radius:50%;display:grid;place-items:center;font-size:12px;font-weight:700;border:1px solid var(--border-strong);color:var(--text-secondary)}
+.onboarding-steps li.done .step-mark{background:var(--success-soft);border-color:rgba(16,185,129,.4);color:var(--success)}
+.step-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
 /* public site: landing, pricing, legal and error pages */
 .pub-nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:20px;max-width:1120px;margin:0 auto;padding:14px 16px;background:var(--bg-main)}
 .pub-nav .sidebar-brand{border:none;margin:0;padding:0;text-decoration:none;color:inherit}
