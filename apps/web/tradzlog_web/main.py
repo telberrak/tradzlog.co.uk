@@ -10,10 +10,12 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 
+from tradzlog_api.config import settings
 from tradzlog_api.services import storage
 from tradzlog_api.services.ai import build_coaching_payload, generate_coaching_insight
 from tradzlog_api.services.analytics import (
@@ -61,6 +63,7 @@ from tradzlog_db.session import SessionLocal
 from tradzlog_web import book, localtime
 from tradzlog_web.account_routes import router as account_router
 from tradzlog_web.auth import LoginRequired, current_user, web_auth
+from tradzlog_web.context import CURRENT_USER_ID
 from tradzlog_web.components import (
     edge_bars,
     equity_chart,
@@ -78,6 +81,8 @@ from tradzlog_web.components import (
     trade_table,
 )
 from tradzlog_web.import_routes import router as import_router
+from tradzlog_web.public_routes import error_page, feature_gate, landing_page
+from tradzlog_web.public_routes import router as public_router
 from tradzlog_web.settings_routes import router as settings_router
 from tradzlog_web.ui import (
     coach_quality_badge,
@@ -99,8 +104,10 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
     # Identify the signed-in user and enforce CSRF on every POST (see tradzlog_web.auth).
-    dependencies=[Depends(web_auth)],
+    # Switched-off features answer 404 (tradzlog_web.public_routes.feature_gate).
+    dependencies=[Depends(web_auth), Depends(feature_gate)],
 )
+app.include_router(public_router)
 app.include_router(account_router)
 app.include_router(settings_router)
 app.include_router(import_router)
@@ -112,6 +119,20 @@ async def login_required(request: Request, exc: LoginRequired) -> RedirectRespon
     target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
     destination = f"/login?next={quote(target)}" if request.method == "GET" and target not in {"/", "/dashboard"} else "/login"
     return RedirectResponse(destination, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException) -> HTMLResponse:
+    del request
+    detail = exc.detail if isinstance(exc.detail, str) else None
+    return HTMLResponse(error_page(exc.status_code, detail), status_code=exc.status_code, headers=getattr(exc, "headers", None))
+
+
+@app.exception_handler(Exception)
+async def server_error(request: Request, exc: Exception) -> HTMLResponse:
+    # Runs outside the middleware below, so it adds the security headers itself.
+    del request, exc
+    return HTMLResponse(error_page(500), status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, headers=SECURITY_HEADERS)
 UPLOAD_ROOT = storage.LOCAL_ROOT
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 # Only used by local storage; in production screenshots are private S3 objects behind presigned links.
@@ -155,8 +176,8 @@ async def web_security_headers(request: Request, call_next):
     if request.method == "POST" and is_sensitive_web_post(request.url.path):
         result = rate_limiter.check(f"web:{request.url.path}:{client}", limit=30, window_seconds=60)
         if not result.allowed:
-            response = Response(
-                "Rate limit exceeded",
+            response = HTMLResponse(
+                error_page(status.HTTP_429_TOO_MANY_REQUESTS),
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 headers={"X-Request-ID": request_id},
             )
@@ -326,6 +347,17 @@ def render_dashboard(account_id: str | None = None, range_code: str | None = Non
 
 
 @app.get("/", response_class=HTMLResponse)
+def home(
+    account_id: str | None = Query(default=None),
+    range_code: str | None = Query(default=None, alias="range"),
+    month: str | None = Query(default=None),
+) -> str:
+    # Visitors see the landing page; signed-in users go straight to their dashboard.
+    if CURRENT_USER_ID.get() is None:
+        return landing_page()
+    return render_dashboard(account_id, range_code, month)
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(
     account_id: str | None = Query(default=None),
@@ -760,6 +792,11 @@ def trade_detail(trade_id: str) -> str:
         point_value = trade.instrument.point_value or Decimal("1")
         planned_risk = abs(entry - trade.planned_stop) * size * point_value if entry is not None and trade.planned_stop is not None else None
         tid = escape(trade.id)
+        share_button = (
+            f'<form method="post" action="/trades/{tid}/share" style="margin:0"><button class="btn" type="submit">Share</button></form>'
+            if settings.feature_community
+            else ""
+        )
         meta = " · ".join(
             escape(part) for part in (trade.account.name, trade.setup_tag or "No setup", trade.timeframe or "", short_datetime(trade.opened_at, today)) if part
         )
@@ -780,7 +817,7 @@ def trade_detail(trade_id: str) -> str:
             <span class="meta">{meta}</span>
             <div class="actions">
               <a class="btn" href="/trades/{tid}/journal">Write review</a>
-              <form method="post" action="/trades/{tid}/share" style="margin:0"><button class="btn" type="submit">Share</button></form>
+              {share_button}
             </div>
           </div>
           <section class="kpi-row">

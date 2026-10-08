@@ -341,6 +341,51 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .auth-card .switch{margin:16px 0 0;font-size:13px;color:var(--text-muted);text-align:center}
 .form-error{background:var(--danger-soft);color:var(--danger);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
 .form-ok{background:var(--success-soft);color:var(--success);border:1px solid rgba(16,185,129,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
+/* public site: landing, pricing, legal and error pages */
+.pub-nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:20px;max-width:1120px;margin:0 auto;padding:14px 16px;background:var(--bg-main)}
+.pub-nav .sidebar-brand{border:none;margin:0;padding:0;text-decoration:none;color:inherit}
+.pub-links{display:flex;gap:18px;margin-left:12px}
+.pub-links a{color:var(--text-secondary);text-decoration:none;font-size:14px}
+.pub-links a:hover,.pub-links a.active{color:var(--text-primary)}
+.pub-actions{margin-left:auto;display:flex;gap:8px}
+.pub-main{max-width:1120px;margin:0 auto;padding:0 16px 64px}
+.hero{padding:72px 0 48px;max-width:760px}
+.hero .eyebrow,.pub-section .eyebrow{color:var(--accent);font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;margin:0 0 12px}
+.hero h1{font-size:clamp(32px,5vw,52px);line-height:1.08;letter-spacing:-.02em;margin:0 0 18px}
+.hero p.lede{font-size:18px;line-height:1.6;color:var(--text-secondary);margin:0 0 28px}
+.hero .cta{display:flex;gap:10px;flex-wrap:wrap}
+.hero .cta .btn,.pub-section .cta .btn{height:42px;padding:0 20px;font-size:14px}
+.pub-section{padding:40px 0;border-top:1px solid var(--border-subtle)}
+.pub-section h2{font-size:26px;letter-spacing:-.01em;margin:0 0 10px}
+.pub-section > p{color:var(--text-secondary);max-width:680px;line-height:1.6;margin:0 0 24px}
+.feature-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.feature{background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);padding:20px}
+.feature h3{font-size:16px;margin:0 0 8px}
+.feature p,.feature li{color:var(--text-secondary);font-size:14px;line-height:1.55;margin:0}
+.feature ul{margin:8px 0 0;padding-left:18px;display:grid;gap:4px}
+.broker-list{display:flex;flex-wrap:wrap;gap:8px}
+.broker-list span{border:1px solid var(--border-subtle);border-radius:999px;padding:6px 14px;font-size:13px;color:var(--text-secondary);background:var(--bg-surface)}
+.price-card{max-width:440px;background:var(--bg-surface);border:1px solid var(--brand-border);border-radius:var(--radius-lg);padding:28px}
+.price-card .amount{font-size:40px;font-weight:700;margin:8px 0 4px}
+.price-card ul{padding-left:18px;color:var(--text-secondary);line-height:1.8;margin:16px 0 24px}
+.prose{max-width:760px;padding:48px 0;line-height:1.7;color:var(--text-secondary)}
+.prose h1{color:var(--text-primary);font-size:34px;letter-spacing:-.01em;margin:0 0 6px}
+.prose h2{color:var(--text-primary);font-size:20px;margin:32px 0 8px}
+.prose .updated{color:var(--text-muted);font-size:13px;margin:0 0 24px}
+.prose a{color:var(--accent)}
+.prose table{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+.prose th,.prose td{text-align:left;border-bottom:1px solid var(--border-subtle);padding:8px 6px;vertical-align:top}
+.notice{border:1px solid rgba(245,158,11,.35);background:var(--warning-soft);color:var(--text-primary);border-radius:var(--radius-md);padding:12px 14px;font-size:14px}
+.site-footer{border-top:1px solid var(--border-subtle);margin-top:24px}
+.site-footer .inner{max-width:1120px;margin:0 auto;padding:28px 16px;display:grid;gap:14px;color:var(--text-muted);font-size:13px;line-height:1.6}
+.site-footer nav{display:flex;flex-wrap:wrap;gap:16px}
+.site-footer a{color:var(--text-secondary);text-decoration:none}
+.site-footer a:hover{color:var(--text-primary)}
+.error-page{padding:96px 0;max-width:560px}
+.error-page .code{font-family:var(--font-mono);color:var(--accent);font-size:14px;margin:0 0 10px}
+.error-page h1{font-size:32px;margin:0 0 12px}
+.error-page p{color:var(--text-secondary);line-height:1.6;margin:0 0 24px}
+@media (max-width:720px){.pub-links{display:none}.hero{padding:40px 0 32px}.hero p.lede{font-size:16px}}
 """
 
 THEME_SCRIPT = """
@@ -499,6 +544,54 @@ def auth_page(title: str, body: str) -> str:
     </main>
   </body>
 </html>""")
+
+RISK_NOTICE = (
+    "TradzLog is a journal and analytics tool. Nothing on this site is financial advice, and past results "
+    "do not predict future returns. Trading carries a high risk of losing money."
+)
+
+
+def public_page(title: str, body: str, *, active: str = "", signed_in: bool = False, description: str = "") -> str:
+    """Layout for pages visitors can see without signing in: top navigation, content, legal footer."""
+    links = "".join(
+        f'<a class="{"active" if key == active else ""}" href="{href}">{label}</a>'
+        for label, href, key in (("Features", "/features", "features"), ("Pricing", "/pricing", "pricing"), ("Security", "/security", "security"))
+    )
+    actions = (
+        '<a class="btn btn-primary" href="/dashboard">Open dashboard</a>'
+        if signed_in
+        else '<a class="btn btn-ghost" href="/login">Sign in</a><a class="btn btn-primary" href="/signup">Get started</a>'
+    )
+    meta = f'<meta name="description" content="{escape(description)}" />' if description else ""
+    return inject_csrf(f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{escape(title)} · TradzLog</title>
+    {meta}
+    <style>{CSS}</style>
+    <script>{THEME_SCRIPT}</script>
+  </head>
+  <body>
+    <header class="pub-nav">
+      <a class="sidebar-brand" href="/"><div class="logo">TZ</div><div class="name">TRADZLOG</div></a>
+      <nav class="pub-links" aria-label="Site">{links}</nav>
+      <div class="pub-actions">{actions}</div>
+    </header>
+    <main class="pub-main">{body}</main>
+    <footer class="site-footer">
+      <div class="inner">
+        <nav aria-label="Legal">
+          <a href="/legal/terms">Terms</a><a href="/legal/privacy">Privacy</a><a href="/legal/cookies">Cookies</a>
+          <a href="/legal/risk">Risk disclaimer</a><a href="/security">Security</a>
+        </nav>
+        <p style="margin:0">{escape(RISK_NOTICE)}</p>
+      </div>
+    </footer>
+  </body>
+</html>""")
+
 
 def kpi_card(label: str, value: str, value_tone: str = "neutral", note: str = "") -> str:
     return (

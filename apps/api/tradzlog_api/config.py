@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # When closed, sign-up needs REGISTRATION_INVITE_CODE (private beta). Production defaults to closed.
     registration_open: bool = True
     registration_invite_code: str | None = None
+    # Unfinished features stay hidden (404, no links) until they are real: community/mentor pages and
+    # public trade shares, and the simulated billing page that M2 replaces with Stripe.
+    feature_community: bool = False
+    feature_billing: bool = False
+    # Shown on the legal and error pages; must be a mailbox someone reads.
+    support_email: str = "support@tradzlog.com"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -94,6 +94,8 @@ def test_visitors_are_sent_to_sign_in(client) -> None:
     assert response.headers["location"] == "/login?next=/trades%3Fstatus_filter%3DOPEN"
     assert client.get("/login").status_code == 200
     assert client.get("/livez").status_code == 200
+    landing = client.get("/", follow_redirects=False)
+    assert landing.status_code == 200 and 'href="/signup"' in landing.text
 
 
 def test_sign_up_sign_out_and_sign_in(client) -> None:
@@ -231,8 +233,13 @@ def seed_private_book(email: str, marker: str) -> dict[str, str]:
         db.close()
 
 
-def test_users_never_see_each_others_data() -> None:
+def test_users_never_see_each_others_data(monkeypatch) -> None:
     import tradzlog_web.main as web_main
+    from tradzlog_api.config import settings
+
+    # Crawl the switched-off features too, so they are already safe when they are switched on.
+    monkeypatch.setattr(settings, "feature_community", True)
+    monkeypatch.setattr(settings, "feature_billing", True)
 
     marker = f"secret{uuid4().hex[:8]}"
     with new_client() as alice, new_client() as bob:
