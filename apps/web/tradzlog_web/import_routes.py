@@ -255,7 +255,7 @@ def preview_body(db, batch: BrokerSync, account: Account) -> str:
     fill_rows = "".join(
         f"""<tr><td class="muted">{escape(fmt(fill.executed_at))}</td><td><b>{escape(fill.symbol)}</b></td>
           <td><span class="badge {'badge-long' if fill.side == 'BUY' else 'badge-short' if fill.side == 'SELL' else ''}">{'EXPIRE/ASSIGN' if fill.side == 'CLOSE' else fill.side}</span></td>
-          <td class="num">{escape(number(fill.quantity).rstrip('0').rstrip('.'))}</td><td class="num">{escape(str(fill.price))}</td>
+          <td class="num">{escape(number(fill.quantity).rstrip('0').rstrip('.'))}</td><td class="num">{escape(plain_number(fill.price))}</td>
           <td class="num">{money(fill.fees)}</td><td class="muted">{escape(fill.broker_id or '')}</td>
           <td>{'<span class="badge badge-open">New</span>' if print_ in new_prints else '<span class="badge">Already imported</span>'}</td></tr>"""
         for fill, print_ in list(zip(fills, prints, strict=True))[:200]
