@@ -33,6 +33,7 @@ from tradzlog_db.models import (
     BillingInvoice,
     BillingSubscription,
     BrokerSync,
+    CashTransaction,
     DailyStats,
     Execution,
     Instrument,
@@ -74,7 +75,7 @@ def user_rows(db: Session, user: User) -> dict[str, list[Any]]:
     account_ids = select(Account.id).where(Account.user_id == user.id)
     trade_ids = select(Trade.id).where(Trade.user_id == user.id)
     journal_ids = select(JournalEntry.id).where(JournalEntry.user_id == user.id)
-    by_user = (TradingRule, RuleBreach, AIInsight, PublicTradeShare, LeaderboardProfile, BillingSubscription, BillingInvoice)
+    by_user = (CashTransaction, TradingRule, RuleBreach, AIInsight, PublicTradeShare, LeaderboardProfile, BillingSubscription, BillingInvoice)
     rows: dict[str, list[Any]] = {
         "users": [user],
         "web_sessions": list(db.scalars(select(WebSession).where(WebSession.user_id == user.id))),

@@ -34,8 +34,42 @@ class Period:
     def contains_previous(self, day: date) -> bool:
         return self.previous_start is not None and self.start is not None and self.previous_start <= day < self.start
 
+    @property
+    def custom(self) -> bool:
+        return CUSTOM_SEPARATOR in self.code
+
+
+# A custom range travels in the same ``range`` parameter as the presets, e.g. "2026-01-01..2026-03-31"
+# (either side may be empty), so every link that carries the range keeps it.
+CUSTOM_SEPARATOR = ".."
+
+
+def custom_code(start: date | None, end: date | None) -> str | None:
+    """The ``range`` value for a from/to pair (swapped if reversed), or None if both are empty."""
+    if start is None and end is None:
+        return None
+    if start is not None and end is not None and start > end:
+        start, end = end, start
+    return f"{start.isoformat() if start else ''}{CUSTOM_SEPARATOR}{end.isoformat() if end else ''}"
+
+
+def parse_day(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value.strip()) if value.strip() else None
+    except ValueError:
+        return None
+
 
 def resolve_period(code: str | None, today: date) -> Period:
+    if code and CUSTOM_SEPARATOR in code:
+        first, _, last = code.partition(CUSTOM_SEPARATOR)
+        start, end = parse_day(first), parse_day(last)
+        if start is not None or end is not None:
+            canonical = custom_code(start, end)
+            start, end = (parse_day(part) for part in canonical.split(CUSTOM_SEPARATOR))
+            end = end or max(today, start)
+            previous_start = start - (end - start + timedelta(days=1)) if start else None
+            return Period(canonical, start, end, previous_start)
     code = (code or DEFAULT_RANGE).upper()
     if code not in RANGES:
         code = DEFAULT_RANGE
@@ -126,14 +160,21 @@ class EquityPoint:
     drawdown_pct: Decimal
 
 
-def equity_curve(opening_balance: Decimal, trades: Iterable[Trade]) -> list[EquityPoint]:
-    """Daily closing balance and drawdown-from-peak, starting from ``opening_balance``."""
+def equity_curve(opening_balance: Decimal, trades: Iterable[Trade], cash_flows: dict[date, Decimal] | None = None) -> list[EquityPoint]:
+    """Daily closing balance and drawdown-from-peak, starting from ``opening_balance``.
+
+    Deposits and withdrawals (``cash_flows``, signed, by day) move the balance and the peak together,
+    so they never show up as gains or drawdowns.
+    """
     balance = opening_balance
     peak = opening_balance
     points: list[EquityPoint] = []
-    for day, value in daily_pnl(trades).items():
-        balance += value
-        peak = max(peak, balance)
+    pnl_by_day = daily_pnl(trades)
+    flows = cash_flows or {}
+    for day in sorted(set(pnl_by_day) | set(flows)):
+        flow = flows.get(day, ZERO)
+        balance += pnl_by_day.get(day, ZERO) + flow
+        peak = max(peak + flow, balance)
         drawdown = (balance - peak) / peak * 100 if peak > 0 else ZERO
         points.append(EquityPoint(day, balance, drawdown))
     return points

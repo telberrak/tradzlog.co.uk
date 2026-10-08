@@ -151,6 +151,11 @@ class MentorAccessStatus(str, enum.Enum):
     REVOKED = "REVOKED"
 
 
+class CashTransactionType(str, enum.Enum):
+    DEPOSIT = "DEPOSIT"
+    WITHDRAWAL = "WITHDRAWAL"
+
+
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -263,6 +268,27 @@ class Account(TimestampMixin, Base):
 
     user: Mapped[User] = relationship(back_populates="accounts")
     trades: Mapped[list[Trade]] = relationship(back_populates="account", cascade="all, delete-orphan")
+
+
+class CashTransaction(TimestampMixin, Base):
+    """Money moved into or out of a trading account. Changes the balance, never P&L or drawdown."""
+
+    __tablename__ = "cash_transactions"
+    __table_args__ = (Index("ix_cash_transactions_account_date", "account_id", "occurred_on"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    type: Mapped[CashTransactionType] = mapped_column(Enum(CashTransactionType), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False)  # always positive; the type gives the sign
+    occurred_on: Mapped[date] = mapped_column(Date, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(255))
+
+    account: Mapped[Account] = relationship()
+
+    @property
+    def signed_amount(self) -> Decimal:
+        return self.amount if self.type == CashTransactionType.DEPOSIT else -self.amount
 
 
 class Instrument(TimestampMixin, Base):

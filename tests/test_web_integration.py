@@ -47,6 +47,15 @@ def migrated() -> None:
     command.upgrade(Config(str(ROOT / "alembic.ini")), "head")
 
 
+@pytest.fixture(autouse=True)
+def fresh_rate_limits(monkeypatch) -> None:
+    """Each test gets its own limiter: the suite signs up more users per minute than the real limit allows."""
+    import tradzlog_web.main as web_main
+    from tradzlog_api.services.hardening import InMemoryRateLimiter
+
+    monkeypatch.setattr(web_main, "rate_limiter", InMemoryRateLimiter())
+
+
 @pytest.fixture
 def client():
     from fastapi.testclient import TestClient
@@ -186,6 +195,8 @@ def seed_private_book(email: str, marker: str) -> dict[str, str]:
         AccountType,
         AssetClass,
         Attachment,
+        CashTransaction,
+        CashTransactionType,
         Direction,
         Execution,
         ExecutionType,
@@ -225,10 +236,13 @@ def seed_private_book(email: str, marker: str) -> dict[str, str]:
                           file_size=10, mime_type="image/png"))
         share = PublicTradeShare(user_id=user.id, trade_id=trade.id, slug=f"{marker}-share", title=f"{marker}-share-title")
         db.add(share)
+        cash = CashTransaction(user_id=user.id, account_id=account.id, type=CashTransactionType.DEPOSIT, amount=Decimal("2500"),
+                               occurred_on=opened.date(), note=f"{marker}-deposit")
+        db.add(cash)
         db.add(MentorAccess(student_user_id=user.id, mentor_email=f"{marker}@mentor.example", mentor_name=f"{marker}-mentor",
                             status=MentorAccessStatus.ACTIVE, can_view_journals=True, can_comment=True))
         db.commit()
-        return {"trade_id": trade.id, "journal_id": journal.id, "account_id": account.id, "slug": share.slug}
+        return {"trade_id": trade.id, "journal_id": journal.id, "account_id": account.id, "slug": share.slug, "cash_id": cash.id}
     finally:
         db.close()
 
@@ -267,12 +281,18 @@ def test_users_never_see_each_others_data(monkeypatch) -> None:
         token = csrf_from(page.text)
         bob.post(f"/positions/{alice_ids['trade_id']}/close", data={"csrf_token": token, "exit_price": "1", "quantity": "10", "fees": "0"})
         bob.post(f"/trades/{alice_ids['trade_id']}/share", data={"csrf_token": token})
+        bob.post(f"/transactions/{alice_ids['cash_id']}/delete", data={"csrf_token": token})
+        bob.post("/transactions", data={"csrf_token": token, "account_id": alice_ids["account_id"], "type": "WITHDRAWAL",
+                                        "amount": "1", "occurred_on": "2026-01-01", "note": ""})
 
-    from tradzlog_db.models import PublicTradeShare, Trade, TradeStatus
+    from tradzlog_db.models import CashTransaction, PublicTradeShare, Trade, TradeStatus
 
     db = SessionLocal()
     try:
         assert db.get(Trade, alice_ids["trade_id"]).status == TradeStatus.OPEN
+        assert db.get(CashTransaction, alice_ids["cash_id"]) is not None
+        assert db.scalar(select(CashTransaction).where(CashTransaction.account_id == alice_ids["account_id"],
+                                                       CashTransaction.id != alice_ids["cash_id"])) is None
         shares = db.scalars(select(PublicTradeShare).where(PublicTradeShare.trade_id == alice_ids["trade_id"])).all()
         assert [share.slug for share in shares] == [alice_ids["slug"]]
     finally:
@@ -753,3 +773,83 @@ def test_first_run_guide_finishes_itself_when_every_step_is_done(client) -> None
         assert db.scalar(select(User).where(User.email == email)).onboarded_at is not None
     finally:
         db.close()
+
+
+# --------------------------------------------------------------------- transactions, positions filter, custom dates
+
+
+def test_deposits_and_withdrawals(client) -> None:
+    sign_up(client, "Saver")
+    account_id, token = account_with_csrf(client)  # starting balance 50,000
+    empty = client.get("/transactions").text
+    assert "No deposits or withdrawals in this view." in empty
+
+    for kind, value, day in (("DEPOSIT", "10,000", "2026-02-01"), ("WITHDRAWAL", "2500.50", "2026-03-01")):
+        saved = client.post("/transactions", data={"csrf_token": token, "account_id": account_id, "type": kind, "amount": value,
+                                                   "occurred_on": day, "note": f"{kind.lower()} note"}, follow_redirects=False)
+        assert "message=" in saved.headers["location"], saved.headers["location"]
+    page = client.get("/transactions").text
+    assert "+$10,000.00" in page and "-$2,500.50" in page and "+$7,499.50" in page and "withdrawal note" in page
+
+    for form in ({"amount": "0"}, {"amount": "-5"}, {"amount": "abc"}, {"occurred_on": "not-a-date"}, {"type": "GIFT"}):
+        bad = {"csrf_token": token, "account_id": account_id, "type": "DEPOSIT", "amount": "1", "occurred_on": "2026-02-01", "note": "", **form}
+        assert "error=" in client.post("/transactions", data=bad, follow_redirects=False).headers["location"], form
+
+    february = client.get("/transactions?range=2026-02-01..2026-02-28").text
+    assert "+$10,000.00" in february and "-$2,500.50" not in february
+
+    # The dashboard balance includes the cash flows: 50,000 + 10,000 - 2,500.50.
+    from tradzlog_db.models import AssetClass, Direction, Instrument, Trade, TradeMetrics, TradeStatus, User
+
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).join(User.accounts).where(User.accounts.any(id=account_id)))
+        instrument = Instrument(symbol=f"C{uuid4().hex[:6].upper()}", name="Cash test", asset_class=AssetClass.STOCK, point_value=Decimal("1"))
+        db.add(instrument)
+        db.flush()
+        closed = datetime(2026, 3, 2, 15, tzinfo=UTC)
+        trade = Trade(account_id=account_id, user_id=user.id, instrument_id=instrument.id, direction=Direction.LONG, status=TradeStatus.CLOSED,
+                      opened_at=closed - timedelta(hours=1), closed_at=closed, commissions=Decimal("0"), mistake_flags=[], tags=[], is_reviewed=False)
+        db.add(trade)
+        db.flush()
+        db.add(TradeMetrics(trade_id=trade.id, average_entry=Decimal("10"), total_quantity=Decimal("1"), realized_pnl=Decimal("1")))
+        db.commit()
+    finally:
+        db.close()
+    dashboard = client.get("/dashboard?range=ALL").text
+    assert "$57,500.50" in dashboard  # 50,000 + 10,000 - 2,500.50 + 1 = 57,500.50
+
+    from tradzlog_db.models import CashTransaction
+
+    db = SessionLocal()
+    try:
+        withdrawal_id = db.scalar(select(CashTransaction.id).where(CashTransaction.account_id == account_id, CashTransaction.amount == Decimal("2500.5")))
+    finally:
+        db.close()
+    removed = client.post(f"/transactions/{withdrawal_id}/delete", data={"csrf_token": token, "back": "https://evil.example/"}, follow_redirects=False)
+    assert removed.headers["location"].startswith("/transactions?")
+    assert "-$2,500.50" not in client.get("/transactions").text
+
+
+def test_positions_can_be_filtered_by_account(client) -> None:
+    email = sign_up(client, "Holder")
+    first = seed_private_book(email, f"posa{uuid4().hex[:6]}")
+    second = seed_private_book(email, f"posb{uuid4().hex[:6]}")
+    everything = client.get("/positions").text
+    assert everything.count('href="/trades/') >= 2
+    only_first = client.get(f"/positions?account_id={first['account_id']}").text
+    assert f'/trades/{first["trade_id"]}' in only_first and f'/trades/{second["trade_id"]}' not in only_first
+    assert f'<option value="{first["account_id"]}" selected>' in only_first
+
+
+def test_from_to_dates_become_a_custom_range(client) -> None:
+    sign_up(client, "Ranger")
+    account_with_csrf(client)  # the dashboard shows filters once there is an account
+    for path in ("/dashboard", "/trades", "/analytics", "/analytics/time"):
+        response = client.get(f"{path}?account_id=x&range=1M&from=2026-03-31&to=2026-01-01", follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == f"{path}?account_id=x&range=2026-01-01..2026-03-31"
+        page = client.get(response.headers["location"]).text
+        assert 'name="from" value="2026-01-01"' in page and 'name="to" value="2026-03-31"' in page
+    cleared = client.get("/trades?range=1M&from=&to=", follow_redirects=False)
+    assert cleared.headers["location"] == "/trades?range=1M"

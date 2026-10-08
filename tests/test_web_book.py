@@ -161,3 +161,36 @@ def test_log_trade_rejects_closed_trade_without_exit_and_bad_size() -> None:
         submit(trade_status=TradeStatus.CLOSED)
     with pytest.raises(HTTPException, match="before opened"):
         submit(exit_price="11", closed_at="2026-10-06T10:00")
+
+
+def test_custom_date_ranges() -> None:
+    period = book.resolve_period("2026-01-01..2026-03-31", TODAY)
+    assert (period.start, period.end, period.custom) == (date(2026, 1, 1), date(2026, 3, 31), True)
+    assert period.previous_start == date(2025, 10, 3)  # the 90 days before
+    assert period.contains(date(2026, 3, 31)) and not period.contains(date(2026, 4, 1))
+    swapped = book.resolve_period("2026-03-31..2026-01-01", TODAY)
+    assert swapped.code == "2026-01-01..2026-03-31"
+    since = book.resolve_period("2026-09-01..", TODAY)
+    assert (since.start, since.end) == (date(2026, 9, 1), TODAY)
+    until = book.resolve_period("..2026-02-01", TODAY)
+    assert (until.start, until.end, until.previous_start) == (None, date(2026, 2, 1), None)
+    assert book.resolve_period("garbage..x", TODAY).code == book.DEFAULT_RANGE
+    assert book.custom_code(None, None) is None
+    assert book.custom_code(date(2026, 5, 2), date(2026, 5, 1)) == "2026-05-01..2026-05-02"
+
+
+def test_filter_bar_shows_custom_dates() -> None:
+    html = filter_bar("/trades", [], None, book.resolve_period("2026-01-01..2026-03-31", TODAY))
+    assert 'name="from" value="2026-01-01"' in html and 'name="to" value="2026-03-31"' in html
+    assert 'class="date-range active"' in html and 'class="active"' not in html.split("date-range")[0]
+    preset = filter_bar("/trades", [], None, book.resolve_period("1M", TODAY))
+    assert 'name="from" value=""' in preset
+
+
+def test_deposits_and_withdrawals_move_balance_but_not_drawdown() -> None:
+    trades = [make_trade(date(2026, 1, 2), "100"), make_trade(date(2026, 1, 5), "-50")]
+    flows = {date(2026, 1, 3): Decimal("1000"), date(2026, 1, 4): Decimal("-500")}
+    curve = book.equity_curve(Decimal("1000"), trades, flows)
+    assert [(point.day.day, point.balance) for point in curve] == [(2, Decimal("1100")), (3, Decimal("2100")), (4, Decimal("1600")), (5, Decimal("1550"))]
+    assert [point.drawdown_pct for point in curve[:3]] == [0, 0, 0]  # the withdrawal is not a drawdown
+    assert curve[3].drawdown_pct == Decimal("-50") / Decimal("1600") * 100

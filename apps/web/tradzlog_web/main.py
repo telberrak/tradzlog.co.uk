@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from html import escape
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
@@ -40,6 +40,7 @@ from tradzlog_db.models import (
     BillingInvoice,
     BillingStatus,
     BillingSubscription,
+    CashTransaction,
     Direction,
     Execution,
     ExecutionType,
@@ -66,6 +67,7 @@ from tradzlog_web.auth import LoginRequired, current_user, web_auth
 from tradzlog_web.context import CURRENT_USER_ID
 from tradzlog_web.data_routes import router as data_router
 from tradzlog_web.components import (
+    account_picker,
     edge_bars,
     equity_chart,
     execution_timeline,
@@ -87,6 +89,7 @@ from tradzlog_web.onboarding import router as onboarding_router
 from tradzlog_web.public_routes import error_page, feature_gate, landing_page
 from tradzlog_web.public_routes import router as public_router
 from tradzlog_web.settings_routes import router as settings_router
+from tradzlog_web.transaction_routes import router as transaction_router
 from tradzlog_web.ui import (
     coach_quality_badge,
     empty_state,
@@ -101,6 +104,25 @@ from tradzlog_web.ui import (
 init_observability()
 logger = logging.getLogger("tradzlog.web")
 
+class RedirectTo(Exception):
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+async def custom_range_redirect(request: Request) -> None:
+    """App-wide dependency: the filter bar's From/To fields become one ``range`` value (see book.custom_code)."""
+    params = request.query_params
+    if request.method != "GET" or ("from" not in params and "to" not in params):
+        return
+    code = book.custom_code(book.parse_day(params.get("from", "")), book.parse_day(params.get("to", "")))
+    kept = [(key, value) for key, value in params.multi_items() if key not in {"from", "to", "range", "month"}]
+    if code:
+        kept.append(("range", code))
+    elif params.get("range"):
+        kept.append(("range", params["range"]))
+    raise RedirectTo(request.url.path + (f"?{urlencode(kept)}" if kept else ""))
+
+
 app = FastAPI(
     title="TradzLog Web",
     docs_url=None,
@@ -108,7 +130,7 @@ app = FastAPI(
     openapi_url=None,
     # Identify the signed-in user and enforce CSRF on every POST (see tradzlog_web.auth).
     # Switched-off features answer 404 (tradzlog_web.public_routes.feature_gate).
-    dependencies=[Depends(web_auth), Depends(feature_gate)],
+    dependencies=[Depends(web_auth), Depends(feature_gate), Depends(custom_range_redirect)],
 )
 app.include_router(public_router)
 app.include_router(account_router)
@@ -116,6 +138,7 @@ app.include_router(settings_router)
 app.include_router(import_router)
 app.include_router(data_router)
 app.include_router(onboarding_router)
+app.include_router(transaction_router)
 
 
 @app.exception_handler(LoginRequired)
@@ -124,6 +147,12 @@ async def login_required(request: Request, exc: LoginRequired) -> RedirectRespon
     target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
     destination = f"/login?next={quote(target)}" if request.method == "GET" and target not in {"/", "/dashboard"} else "/login"
     return RedirectResponse(destination, status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.exception_handler(RedirectTo)
+async def redirect_to(request: Request, exc: RedirectTo) -> RedirectResponse:
+    del request
+    return RedirectResponse(exc.url, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @app.exception_handler(StarletteHTTPException)
@@ -161,7 +190,7 @@ WEB_SENSITIVE_POSTS = {
     "/community/mentor/comments",
 }
 
-WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/", "/settings/import/")
+WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/", "/settings/import/", "/transactions")
 
 ALLOWED_UPLOAD_TYPES = set(storage.IMAGE_EXTENSIONS)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -255,7 +284,26 @@ def closed_in(trades: list[Trade], period: book.Period, previous: bool = False) 
     return selected
 
 
-def opening_balance(accounts: list[Account], trades: list[Trade], period: book.Period) -> Decimal:
+def load_cash_flows(session, accounts: list[Account]) -> list[CashTransaction]:
+    """Deposits and withdrawals of ``accounts`` (already the user's own), oldest first."""
+    if not accounts:
+        return []
+    return list(session.scalars(
+        select(CashTransaction).where(CashTransaction.account_id.in_([account.id for account in accounts]))
+        .order_by(CashTransaction.occurred_on, CashTransaction.created_at)
+    ).all())
+
+
+def cash_flows_in(flows: list[CashTransaction], period: book.Period) -> dict[date, Decimal]:
+    days: dict[date, Decimal] = {}
+    for flow in flows:
+        if period.contains(flow.occurred_on):
+            days[flow.occurred_on] = days.get(flow.occurred_on, Decimal("0")) + flow.signed_amount
+    return days
+
+
+def opening_balance(accounts: list[Account], trades: list[Trade], period: book.Period, flows: list[CashTransaction] = ()) -> Decimal:
+    """Starting balances plus everything before the period: closed P&L, deposits and withdrawals."""
     balance = sum((account.starting_balance for account in accounts), Decimal("0"))
     if period.start is not None:
         balance += sum(
@@ -263,6 +311,7 @@ def opening_balance(accounts: list[Account], trades: list[Trade], period: book.P
              if trade.status == TradeStatus.CLOSED and (day := book.closed_day(trade)) is not None and day < period.start),
             Decimal("0"),
         )
+        balance += sum((flow.signed_amount for flow in flows if flow.occurred_on < period.start), Decimal("0"))
     return balance
 
 
@@ -325,8 +374,9 @@ def render_dashboard(account_id: str | None = None, range_code: str | None = Non
         current = closed_in(trades, period)
         previous = book.stats(closed_in(trades, period, previous=True)) if period.previous_start else None
         current_stats = book.stats(current)
-        opening = opening_balance(scope_accounts, trades, period)
-        curve = book.equity_curve(opening, current)
+        flows = load_cash_flows(session, scope_accounts)
+        opening = opening_balance(scope_accounts, trades, period, flows)
+        curve = book.equity_curve(opening, current, cash_flows_in(flows, period))
         closing = curve[-1].balance if curve else opening
         account_param = selected.id if selected else None
         nav_href = "/dashboard" + query_string({"account_id": account_param, "range": period.code})
@@ -872,26 +922,33 @@ def trade_detail(trade_id: str) -> str:
 
 
 @app.get("/positions", response_class=HTMLResponse)
-def positions() -> str:
+def positions(account_id: str | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Positions", "positions", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
-        trades = session.scalars(
+        accounts = list(session.scalars(
+            select(Account).where(Account.user_id == user.id, Account.archived_at.is_(None)).order_by(Account.created_at)
+        ).all())
+        selected = next((account for account in accounts if account.id == account_id), None)
+        query = (
             select(Trade)
             .options(selectinload(Trade.metrics), selectinload(Trade.instrument), selectinload(Trade.account))
             .where(Trade.user_id == user.id, Trade.status == TradeStatus.OPEN)
             .order_by(Trade.opened_at.desc())
-        ).all()
+        )
+        if selected is not None:
+            query = query.where(Trade.account_id == selected.id)
+        trades = session.scalars(query).all()
         rows = ""
         total_risk = Decimal("0")
+        largest_risk = Decimal("0")
         for trade in trades:
             metrics = trade.metrics
             entry = metrics.average_entry if metrics else trade.planned_entry or Decimal("0")
             quantity = metrics.total_quantity if metrics else Decimal("0")
             risk = abs(entry - trade.planned_stop) * quantity if trade.planned_stop is not None else Decimal("0")
             total_risk += risk
+            largest_risk = max(largest_risk, risk)
             rows += f"""
               <tr>
                 <td><a class="pill" href="/trades/{escape(trade.id)}">{escape(trade.instrument.symbol)}</a></td>
@@ -912,11 +969,13 @@ def positions() -> str:
             """
         if not rows:
             rows = '<tr><td colspan="8" class="muted">No open positions. Open trades will appear here.</td></tr>'
+        scope = selected.name if selected else "All accounts"
         body = f"""
+          <div class="filter-bar">{account_picker("/positions", accounts, selected.id if selected else None)}</div>
           <section class="grid kpis">
-            {kpi_card("Open Positions", str(len(trades)), "neutral", "Across accounts")}
+            {kpi_card("Open Positions", str(len(trades)), "neutral", scope)}
             {kpi_card("Total Planned Risk", money(total_risk), "amber" if total_risk else "neutral", "Entry vs stop")}
-            {kpi_card("Largest Risk", money(max([total_risk] + [Decimal("0")])), "neutral", "Current view")}
+            {kpi_card("Largest Risk", money(largest_risk), "neutral", "Single position")}
             {kpi_card("Quick Close", "Enabled", "positive", "Manual exit price")}
           </section>
           <section class="card" style="margin-top:16px">
@@ -924,7 +983,7 @@ def positions() -> str:
             <table><thead><tr><th>Symbol</th><th>Account</th><th>Side</th><th>Entry</th><th>Size</th><th>Risk</th><th>Opened</th><th>Action</th></tr></thead><tbody>{rows}</tbody></table>
           </section>
         """
-        return shell("Positions", "positions", body, "Open Positions", user.name or user.email)
+        return shell("Positions", "positions", body, scope, user.name or user.email)
     finally:
         session.close()
 
@@ -1303,8 +1362,9 @@ def analytics_page(
         accounts, selected, trades = load_book(session, user, account_id)
         current = closed_in(trades, period)
         scope_accounts = [selected] if selected else accounts
-        opening = opening_balance(scope_accounts, trades, period)
-        curve = book.equity_curve(opening, current)
+        flows = load_cash_flows(session, scope_accounts)
+        opening = opening_balance(scope_accounts, trades, period, flows)
+        curve = book.equity_curve(opening, current, cash_flows_in(flows, period))
         account_param = selected.id if selected else None
         qs = query_string({"account_id": account_param, "range": period.code})
         body = (

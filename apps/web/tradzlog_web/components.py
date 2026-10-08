@@ -99,15 +99,8 @@ def query_string(params: dict[str, str | None]) -> str:
     return f"?{urlencode(clean)}" if clean else ""
 
 
-def filter_bar(
-    base_path: str,
-    accounts: Sequence[Account],
-    account_id: str | None,
-    period: Period,
-    extra: dict[str, str | None] | None = None,
-) -> str:
-    """Account picker + date-range segmented control. State lives in the URL."""
-    extra = extra or {}
+def account_picker(base_path: str, accounts: Sequence[Account], account_id: str | None, keep: dict[str, str | None] | None = None) -> str:
+    """An "All accounts / <account>" select that reloads ``base_path``; ``keep`` carries other URL state."""
     options = '<option value="">All accounts</option>' + "".join(
         f'<option value="{escape(account.id)}" {"selected" if account.id == account_id else ""}>'
         f"{escape(account.name)}</option>"
@@ -115,21 +108,47 @@ def filter_bar(
     )
     hidden = "".join(
         f'<input type="hidden" name="{escape(key)}" value="{escape(value)}" />'
-        for key, value in {"range": period.code, **extra}.items()
+        for key, value in (keep or {}).items()
         if value
     )
+    return f"""<form method="get" action="{base_path}">
+        {hidden}
+        <select name="account_id" aria-label="Account" onchange="this.form.submit()">{options}</select>
+        <noscript><button class="btn" type="submit">Apply</button></noscript>
+      </form>"""
+
+
+def filter_bar(
+    base_path: str,
+    accounts: Sequence[Account],
+    account_id: str | None,
+    period: Period,
+    extra: dict[str, str | None] | None = None,
+) -> str:
+    """Account picker + date-range segmented control + custom from/to dates. State lives in the URL."""
+    extra = extra or {}
     ranges = "".join(
         f'<a class="{"active" if code == period.code else ""}" '
         f'href="{base_path}{escape(query_string({"account_id": account_id, "range": code, **extra}))}">{label}</a>'
         for code, label in RANGES.items()
     )
+    # From/To are turned into a custom ``range`` by tradzlog_web.main.custom_range_redirect.
+    keep = "".join(
+        f'<input type="hidden" name="{escape(key)}" value="{escape(value)}" />'
+        for key, value in {"account_id": account_id, **extra}.items()
+        if value
+    )
+    start = period.start.isoformat() if period.custom and period.start else ""
+    end = period.end.isoformat() if period.custom else ""
     return f"""<div class="filter-bar">
-      <form method="get" action="{base_path}">
-        {hidden}
-        <select name="account_id" aria-label="Account" onchange="this.form.submit()">{options}</select>
-        <noscript><button class="btn" type="submit">Apply</button></noscript>
-      </form>
+      {account_picker(base_path, accounts, account_id, {"range": period.code, **extra})}
       <nav class="seg" aria-label="Date range">{ranges}</nav>
+      <form class="date-range{" active" if period.custom else ""}" method="get" action="{base_path}" aria-label="Custom dates">
+        {keep}
+        <label>From <input type="date" name="from" value="{start}" /></label>
+        <label>To <input type="date" name="to" value="{end}" /></label>
+        <button class="btn btn-sm" type="submit">Apply</button>
+      </form>
     </div>"""
 
 

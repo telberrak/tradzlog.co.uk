@@ -341,6 +341,11 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .auth-card .switch{margin:16px 0 0;font-size:13px;color:var(--text-muted);text-align:center}
 .form-error{background:var(--danger-soft);color:var(--danger);border:1px solid rgba(239,68,68,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
 .form-ok{background:var(--success-soft);color:var(--success);border:1px solid rgba(16,185,129,.3);border-radius:var(--radius-sm);padding:10px 12px;font-size:13px;margin:0 0 14px}
+/* custom from/to dates in the filter bar */
+.date-range{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0}
+.date-range label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text-muted)}
+.date-range input[type=date]{height:30px;padding:0 8px;font-size:12px;width:auto}
+.date-range.active input[type=date]{border-color:var(--accent)}
 /* first-run guide on the dashboard */
 .onboarding{margin-bottom:14px}
 .onboarding-progress{height:6px;border-radius:999px;background:var(--bg-surface-alt);overflow:hidden;margin:0 0 16px}
@@ -450,6 +455,7 @@ NAV_ICONS: dict[str, str] = {
     "portfolio": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 17h7"/></svg>',
     "trades": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
     "positions": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
+    "transactions": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 4v16M3 8l4-4 4 4M17 20V4M13 16l4 4 4-4"/></svg>',
     "journal": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M8 5v14M8 9h4"/></svg>',
     "analytics": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M10 19V9M16 19v-6M22 19V3"/></svg>',
     "coaching": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a7 7 0 0 1 7 7c0 3-2 5-4 6l-1 5H10l-1-5c-2-1-4-3-4-6a7 7 0 0 1 7-7z"/></svg>',
@@ -464,6 +470,7 @@ def sidebar_nav(active: str) -> str:
         ("Portfolio", "/dashboard/portfolio", "portfolio"),
         ("Trades", "/trades", "trades"),
         ("Positions", "/positions", "positions"),
+        ("Transactions", "/transactions", "transactions"),
         ("Journal", "/journal", "journal"),
         ("Analytics", "/analytics", "analytics"),
         ("AI Coaching", "/coaching", "coaching"),
