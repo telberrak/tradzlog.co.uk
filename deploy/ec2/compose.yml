@@ -6,6 +6,10 @@
 # aliases tradzlog-web and tradzlog-api, and /srv/mizan/sites.d/tradzlog.caddy routes the domain to
 # them. Nothing here publishes a port on the host. PostgreSQL and Redis are TradzLog's own and
 # are only reachable on TradzLog's private network, never from Mizan's.
+#
+# Web and api see both networks, and Mizan's network has its own service called "postgres", so the
+# apps reach their database and Redis only by names unique to TradzLog (tradzlog-postgres,
+# tradzlog-redis). A bare "postgres" would resolve to Mizan's database.
 name: tradzlog
 
 x-app: &app
@@ -13,8 +17,8 @@ x-app: &app
   restart: unless-stopped
   environment:
     APP_ENV: production
-    DATABASE_URL: postgresql+psycopg://tradzlog:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/tradzlog
-    REDIS_URL: redis://redis:6379/0
+    DATABASE_URL: postgresql+psycopg://tradzlog:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@tradzlog-postgres:5432/tradzlog
+    REDIS_URL: redis://tradzlog-redis:6379/0
     JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
     JWT_ISSUER: ${TRADZLOG_DOMAIN:?set TRADZLOG_DOMAIN}
     CORS_ORIGINS: '["https://${TRADZLOG_DOMAIN}"]'
@@ -53,6 +57,9 @@ services:
       POSTGRES_DB: tradzlog
     volumes:
       - postgres:/var/lib/postgresql/data
+    networks:
+      default:
+        aliases: [tradzlog-postgres]
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U tradzlog -d tradzlog']
       interval: 5s
@@ -67,6 +74,9 @@ services:
     command: ['redis-server', '--appendonly', 'yes', '--maxmemory', '64mb', '--maxmemory-policy', 'noeviction']
     volumes:
       - redis:/data
+    networks:
+      default:
+        aliases: [tradzlog-redis]
     healthcheck:
       test: ['CMD', 'redis-cli', 'ping']
       interval: 5s
@@ -90,7 +100,8 @@ services:
       edge:
         aliases: [tradzlog-api]
     healthcheck:
-      test: ['CMD', 'curl', '-fsS', 'http://localhost:8000/livez']
+      # /readyz needs the database: a deploy that cannot reach it is unhealthy and rolled back.
+      test: ['CMD', 'curl', '-fsS', 'http://localhost:8000/readyz']
       interval: 10s
       timeout: 5s
       retries: 10
@@ -114,7 +125,7 @@ services:
   worker:
     <<: *app
     mem_limit: 256m
-    command: ['rq', 'worker', 'default', 'analytics', 'imports', 'reports', 'ai', '--url', 'redis://redis:6379/0']
+    command: ['rq', 'worker', 'default', 'analytics', 'imports', 'reports', 'ai', '--url', 'redis://tradzlog-redis:6379/0']
 
 networks:
   # Mizan's Compose network, where its Caddy runs. Created by Mizan's stack.
