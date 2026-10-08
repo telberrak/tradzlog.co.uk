@@ -577,3 +577,30 @@ def test_uploads_read_by_an_older_importer_cannot_be_confirmed(client) -> None:
         assert db.scalar(select(Trade.id).where(Trade.account_id == account_id)) is None
     finally:
         db.close()
+
+
+def test_commission_per_side_for_files_without_fees(client) -> None:
+    from tradzlog_db.models import Execution, Trade
+
+    sign_up(client, "Futures")
+    account_id, token = account_with_csrf(client, "NinjaTrader")
+    raw = (FIXTURE_DIR / "ninjatrader_position_history.csv").read_bytes()
+    response = client.post("/settings/import/preview",
+                           data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": "UTC", "commission_per_side": "0.50"},
+                           files={"file": ("nt.csv", raw, "text/csv")}, follow_redirects=False)
+    batch = response.headers["location"].rsplit("/", 1)[1]
+    preview = client.get(f"/settings/import/{batch}").text
+    assert "Commission added: <b>$4.00</b>" in preview  # 0.50 x (1+1+1+1+2+2) contract sides
+    client.post(f"/settings/import/{batch}/confirm", data={"csrf_token": token})
+    summary = client.get(f"/settings/import/{batch}").text
+    assert "of commission you entered" in summary and "matches" in summary
+    db = SessionLocal()
+    try:
+        fees = db.scalars(select(Execution.fees).join(Trade).where(Trade.account_id == account_id)).all()
+        assert sum(fees) == Decimal("4.0000")
+    finally:
+        db.close()
+    bad = client.post("/settings/import/preview",
+                      data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": "UTC", "commission_per_side": "-1"},
+                      files={"file": ("nt.csv", raw, "text/csv")}, follow_redirects=False)
+    assert "error=" in bad.headers["location"]

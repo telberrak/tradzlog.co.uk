@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import csv
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, tzinfo
 from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
@@ -586,6 +586,21 @@ def mt5_deals_section(rows: list[list[str]], width: int) -> list[list[str]]:
             break
         out.append(row[:width])
     return out
+
+
+def with_commission(fills: list[ImportedExecution], per_side: Decimal) -> tuple[list[ImportedExecution], Decimal]:
+    """Charge ``per_side`` per contract on every fill the file gave no fee for (expirations excepted).
+    For exports such as NinjaTrader's Position History that leave commissions out."""
+    if per_side <= 0:
+        return fills, Decimal("0")
+    out, added = [], Decimal("0")
+    for fill in fills:
+        if fill.fees == 0 and fill.side != "CLOSE":
+            fee = (per_side * fill.quantity).quantize(Decimal("0.0001"))
+            fill = replace(fill, fees=fee)
+            added += fee
+        out.append(fill)
+    return out, added
 
 
 # --------------------------------------------------------------------- API compatibility

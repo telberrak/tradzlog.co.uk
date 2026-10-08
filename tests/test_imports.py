@@ -277,3 +277,14 @@ def test_ninjatrader_position_history_matches_its_own_pnl() -> None:
         totals[symbol] = total
     assert totals == {"MESM6": D("-5.00"), "MNQM6": D("122.00")}  # -12.50 + 7.50, and 2 x 30.50 x 2
     assert sum(fill.broker_pnl for fill in result.executions if fill.broker_pnl is not None) == D("117.00")
+
+
+def test_commission_is_added_only_where_the_file_has_no_fees() -> None:
+    from tradzlog_api.services.imports import with_commission
+
+    no_fee = fill("BUY", "3", "10", 0)
+    with_fee = fill("SELL", "3", "11", 1, fees="2.04")
+    expiry = ImportedExecution(symbol="AAPL", executed_at=T0, side="CLOSE", price=D("0"), quantity=D("2"))
+    updated, added = with_commission([no_fee, with_fee, expiry], D("0.62"))
+    assert [item.fees for item in updated] == [D("1.86"), D("2.04"), D("0")] and added == D("1.86")
+    assert with_commission([no_fee], D("0")) == ([no_fee], D("0"))

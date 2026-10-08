@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, select
 from starlette.concurrency import run_in_threadpool
 
-from tradzlog_api.services.imports import DATE_ORDERS, FORMATS, PARSER_VERSION, ImportFormatError, parse_import
+from tradzlog_api.services.imports import DATE_ORDERS, FORMATS, PARSER_VERSION, ImportFormatError, parse_import, with_commission
 from tradzlog_api.services.trade_import import (
     UndoNotAllowed,
     apply_import,
@@ -117,6 +117,9 @@ def import_page(message: str = Query(default=""), error: str = Query(default="")
                 <div class="field"><label for="i-tz">Times in the file are in</label><select id="i-tz" name="timezone">{tz_options}</select></div>
                 <div class="field"><label for="i-dates">Date order</label><select id="i-dates" name="date_order">{date_options}</select></div>
               </div>
+              <div class="field"><label for="i-comm">Commission per contract, per side (optional)</label>
+                <input id="i-comm" name="commission_per_side" type="number" step="any" min="0" max="999" placeholder="0.62" style="max-width:180px" />
+                <p class="hint" style="margin:4px 0 0">Only for files without fees, such as NinjaTrader's Position History. Fills that already have fees are left as they are.</p></div>
               <p class="hint" style="margin-top:-4px">Brokers often export in their own timezone (IBKR: your report setting). NinjaTrader writes dates in your computer's regional format.</p>
               <div class="field"><label for="i-file">Export file (CSV, or MetaTrader HTML report)</label><input id="i-file" type="file" name="file" accept=".csv,.txt,.htm,.html,text/csv,text/html" /></div>
               <div class="field"><label for="i-paste">…or paste rows (with a header row)</label><textarea id="i-paste" name="pasted" placeholder="Symbol,Date/Time,Side,Quantity,Price,Commission" style="min-height:90px"></textarea></div>
@@ -150,6 +153,7 @@ async def upload_for_preview(
     file_format: str = Form("auto"),
     timezone: str = Form("UTC"),
     date_order: str = Form("auto"),
+    commission_per_side: str = Form(""),
     pasted: str = Form(""),
     file: UploadFile | None = File(default=None),
 ) -> RedirectResponse:
@@ -167,11 +171,19 @@ async def upload_for_preview(
         return back("/settings/import", error="That file is over 5 MB. Export a shorter date range.")
     if file_format not in FORMATS or date_order not in DATE_ORDERS or not valid_timezone(timezone):
         return back("/settings/import", error="Choose a file format and timezone from the lists.")
+    try:
+        commission = Decimal(commission_per_side.strip()) if commission_per_side.strip() else Decimal("0")
+    except InvalidOperation:
+        commission = Decimal("-1")
+    if not commission.is_finite() or commission < 0 or commission >= 1000:
+        return back("/settings/import", error="Commission must be a number of at least 0, like 0.62.")
     # Parsing and saving can take a while for big files: keep them off the event loop.
-    return await run_in_threadpool(create_preview, account_id, file_format, timezone, date_order, file_name, raw)
+    return await run_in_threadpool(create_preview, account_id, file_format, timezone, date_order, file_name, raw, commission)
 
 
-def create_preview(account_id: str, file_format: str, timezone: str, date_order: str, file_name: str, raw: bytes) -> RedirectResponse:
+def create_preview(
+    account_id: str, file_format: str, timezone: str, date_order: str, file_name: str, raw: bytes, commission: Decimal = Decimal("0")
+) -> RedirectResponse:
     db = SessionLocal()
     try:
         user = current_user(db)
@@ -184,17 +196,21 @@ def create_preview(account_id: str, file_format: str, timezone: str, date_order:
             return back("/settings/import", error=str(problem))
         if len(result.executions) > MAX_ROWS:
             return back("/settings/import", error=f"That file has more than {MAX_ROWS:,} fills. Export a shorter date range.")
+        fills, commission_added = with_commission(result.executions, commission)
         batch = BrokerSync(
             account_id=account.id, broker=account.broker, sync_type=BrokerSyncType.CSV, status=BrokerSyncStatus.PENDING,
             file_name=file_name, file_format=result.file_format, source_timezone=timezone,
             payload={
-                "rows": [to_row(fill) for fill in result.executions],
+                "rows": [to_row(fill) for fill in fills],
                 "problems": [{"row": p.row_number, "reason": p.reason} for p in result.problems[:500]],
                 "problem_count": len(result.problems),
                 "skipped": result.skipped,
                 "date_note": result.date_note,
                 "parser_version": PARSER_VERSION,
+                "commission_per_side": str(commission) if commission_added else None,
             },
+            # Kept after confirming (the payload is cleared), for the P&L check.
+            summary={"commission_added": str(commission_added)} if commission_added else None,
         )
         db.add(batch)
         db.commit()
@@ -206,9 +222,19 @@ def create_preview(account_id: str, file_format: str, timezone: str, date_order:
 # --------------------------------------------------------------------- preview / summary
 
 
-def pnl_check(tradzlog: Decimal | None, broker: Decimal | None) -> str:
+def pnl_check(tradzlog: Decimal | None, broker: Decimal | None, commission_added: Decimal | None = None) -> str:
     if broker is None or tradzlog is None:
         return ""
+    if commission_added:
+        # The broker's figure excludes the commission entered on import: compare like with like.
+        gap = tradzlog + commission_added - broker
+        verdict = (
+            '<span class="positive">matches</span>' if abs(gap) < Decimal("0.01")
+            else f'<span class="amber">differs by {money(gap, signed=True)}</span>'
+        )
+        return (f'<p class="hint">Broker-reported P&amp;L (before commission): <b>{money(broker, signed=True)}</b>; '
+                f'TradzLog: <b>{money(tradzlog, signed=True)}</b> after <b>{money(commission_added)}</b> of commission you entered, '
+                f'so {money(tradzlog + commission_added, signed=True)} before commission, {verdict}.</p>')
     gap = tradzlog - broker
     verdict = (
         '<span class="positive">matches</span>' if abs(gap) < Decimal("0.01")
@@ -277,6 +303,7 @@ def preview_body(db, batch: BrokerSync, account: Account) -> str:
       </section>
       {f'<p class="form-error" role="status">{escape(payload["date_note"])}</p>' if payload.get("date_note") else ""}
       {broker_hint}
+      {f'<p class="hint">Commission added: <b>{money(Decimal((batch.summary or {})["commission_added"]))}</b> at {money(Decimal(payload["commission_per_side"]))} per contract per side, on fills the file gave no fee for.</p>' if payload.get("commission_per_side") else ""}
       <form method="post" action="/settings/import/{escape(batch.id)}/confirm">
         {instruments_html}
         <div class="actions" style="margin:14px 0">
@@ -311,7 +338,7 @@ def summary_body(db, batch: BrokerSync, account: Account) -> str:
         {kpi("Broker P&L", money(broker, signed=True) if broker is not None else "Not in file", "", "as reported in the file")}
         {kpi("New instruments", str(len(created)), "", ", ".join(created[:4]) + ("…" if len(created) > 4 else ""))}
       </section>
-      {pnl_check(tradzlog, broker)}
+      {pnl_check(tradzlog, broker, Decimal(summary["commission_added"]) if summary.get("commission_added") else None)}
       <div class="actions" style="margin:14px 0"><a class="btn btn-primary" href="/trades?account_id={escape(account.id)}&amp;range=ALL">View trades</a>
         <a class="btn" href="/settings/import">Import another file</a>{action}</div>"""
 
