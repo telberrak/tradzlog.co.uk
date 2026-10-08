@@ -55,5 +55,5 @@ python_version = "3.11"
 strict = true
 
 [tool.pytest.ini_options]
-pythonpath = ["apps/api", "packages/db", "packages/types"]
+pythonpath = [".", "apps/api", "packages/db", "packages/types"]
 testpaths = ["tests"]
