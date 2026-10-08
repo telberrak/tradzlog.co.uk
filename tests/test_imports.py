@@ -252,3 +252,28 @@ def test_tastytrade_real_export_layout_reconciles_to_cash_totals() -> None:
     assert nets["AAL"] == cash["AAL"] == D("-193.95")  # stock delivered at 14.50, sold at 13.8705
     snap = next(item for item in result.executions if item.symbol == "SNAP")
     assert snap.price == D("5.6724")  # exact, not the description's rounded 5.67
+
+
+def test_ninjatrader_position_history_matches_its_own_pnl() -> None:
+    result = parse_import((FIXTURES / "ninjatrader_position_history.csv").read_bytes(), "auto", UTC)
+    assert result.file_format == "ninjatrader_positions" and len(result.executions) == 6
+    (problem,) = result.problems  # the position summary row has no fills
+    assert problem.row_number == 5 and "net position -4" in problem.reason
+    first_buy = result.executions[0]
+    assert first_buy.executed_at == datetime(2026, 5, 14, 16, 45, 23, tzinfo=UTC)  # month first
+    assert (first_buy.asset_class, first_buy.point_value) == ("FUTURES", D("5"))
+    by_symbol: dict[str, list] = {}
+    for index, item in enumerate(result.executions):
+        by_symbol.setdefault(item.symbol, []).append((item, f"fp{index}"))
+    totals = {}
+    for symbol, fills in by_symbol.items():
+        point_value = default_instrument(fills[0][0]).point_value
+        total = D("0")
+        for trade in walk(fills, None):
+            entries = [leg for leg in trade.legs if leg.type in {ExecutionType.ENTRY, ExecutionType.ADD}]
+            exits = [leg for leg in trade.legs if leg not in entries]
+            move = sum(leg.fill.price * leg.quantity for leg in exits) - sum(leg.fill.price * leg.quantity for leg in entries)
+            total += (move if trade.direction == Direction.LONG else -move) * point_value
+        totals[symbol] = total
+    assert totals == {"MESM6": D("-5.00"), "MNQM6": D("122.00")}  # -12.50 + 7.50, and 2 x 30.50 x 2
+    assert sum(fill.broker_pnl for fill in result.executions if fill.broker_pnl is not None) == D("117.00")

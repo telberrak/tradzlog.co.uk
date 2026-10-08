@@ -1,0 +1,5 @@
+Position ID,Timestamp,Trade Date,Net Pos,Net Price,Bought,Avg. Buy,Sold,Avg. Sell,Account,Contract,Product,Product Description,_priceFormat,_priceFormatType,_tickSize,Pair ID,Buy Fill ID,Sell Fill ID,Paired Qty,Buy Price,Sell Price,P/L,Currency,Bought Timestamp,Sold Timestamp
+100,05/14/2026 20:56:07,2026-05-14,0,,2,7282.88,2,7282.38,999,MESM6,MES,Micro E-mini S&P 500,-2,0,0.25,201,301,401,1,7282.50,7280.00,-12.50,USD,05/14/2026 16:45:23,05/14/2026 16:40:35
+100,05/14/2026 20:56:07,2026-05-14,0,,2,7282.88,2,7282.38,999,MESM6,MES,Micro E-mini S&P 500,-2,0,0.25,202,302,402,1,7283.25,7284.75,7.50,USD,05/14/2026 17:01:10,05/14/2026 17:20:00
+110,05/15/2026 20:56:07,2026-05-15,0,,2,31050.00,2,31080.50,999,MNQM6,MNQ,Micro E-mini Nasdaq-100,-2,0,0.25,203,303,403,2,31050.00,31080.50,122.00,USD,05/15/2026 14:00:00,05/15/2026 14:05:00
+120,05/25/2026 16:14:36,2026-05-26,-4,7400.00,0,,4,7400.00,999,MESM6,MES,Micro E-mini S&P 500,-2,0,0.25,,,,,,,,USD,,

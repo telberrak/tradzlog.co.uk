@@ -21,7 +21,7 @@ from io import StringIO
 
 # Bump whenever parsing changes what a file produces: uploads read by an older version can't be
 # confirmed (their stored rows would import the old, wrong reading) and must be uploaded again.
-PARSER_VERSION = 3
+PARSER_VERSION = 4
 
 FORMATS: dict[str, str] = {
     "auto": "Detect automatically",
@@ -30,6 +30,7 @@ FORMATS: dict[str, str] = {
     "mt5": "MetaTrader 5 (Deals, CSV or HTML report)",
     "ninjatrader": "NinjaTrader (Executions)",
     "tradovate": "Tradovate (Performance)",
+    "ninjatrader_positions": "NinjaTrader (Position History)",
     "tastytrade": "tastytrade (History: Transactions)",
 }
 
@@ -288,7 +289,7 @@ def detect_format(header_keys: set[str]) -> str:
     if {"tradeprice", "buy/sell"} <= header_keys or "ibcommission" in header_keys:
         return "ibkr_flex"
     if {"buyprice", "sellprice", "boughttimestamp", "soldtimestamp"} <= header_keys:
-        return "tradovate"
+        return "ninjatrader_positions" if "pairedqty" in header_keys else "tradovate"
     if {"instrument", "action", "e/x"} <= header_keys or {"instrument", "action", "quantity", "price", "time", "orderid"} <= header_keys:
         return "ninjatrader"
     if {"deal", "symbol", "type", "direction", "volume", "price"} <= header_keys:
@@ -403,16 +404,24 @@ def parse_ninjatrader(rows: list[tuple[int, dict[str, str]]], clock: Clock, resu
 
 
 def parse_tradovate(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
-    """Performance rows are matched round trips: each becomes its buy fill and its sell fill."""
+    """Matched round trips, one per row: each becomes its buy fill and its sell fill. Used for
+    Tradovate "Performance" and NinjaTrader "Position History" (same data, different column names;
+    NinjaTrader adds position summary columns and leaves commissions out)."""
     for number, row in rows:
+        quantity_text = row.get("qty") or row.get("pairedqty") or ""
+        if not quantity_text and not row.get("buyfillid") and not row.get("sellfillid"):
+            net = row.get("netpos") or "?"
+            result.problems.append(RowProblem(number, f"position summary without matched fills (net position {net}): nothing to import"))
+            continue
         try:
-            symbol = row.get("symbol", "").upper()
-            root = futures_root(symbol)
-            quantity = abs(parse_decimal(row.get("qty")))
+            symbol = (row.get("symbol") or row.get("contract") or "").upper()
+            root = (row.get("product") or "").upper() or futures_root(symbol)
+            quantity = abs(parse_decimal(quantity_text))
             bought = clock(row.get("boughttimestamp", ""))
             sold = clock(row.get("soldtimestamp", ""))
-            hints = {"asset_class": "FUTURES", "point_value": FUTURES_POINT_VALUES.get(root) if root else None}
-            pnl = parse_decimal(row.get("pnl"), default=None)
+            point_value = FUTURES_POINT_VALUES.get(root) if root else None
+            hints = {"asset_class": "FUTURES", "point_value": point_value}
+            pnl = parse_decimal(row.get("pnl") or row.get("p/l"), default=None)
             buy_pnl, sell_pnl = (pnl, None) if bought > sold else (None, pnl)  # P&L belongs to the closing fill
             add(result, number, symbol, bought, "BUY", parse_decimal(row.get("buyprice")), quantity, Decimal("0"),
                 row.get("buyfillid") or None, broker_pnl=buy_pnl, **hints)
@@ -495,6 +504,7 @@ PARSERS = {
     "mt5": parse_mt5,
     "ninjatrader": parse_ninjatrader,
     "tradovate": parse_tradovate,
+    "ninjatrader_positions": parse_tradovate,
     "tastytrade": parse_tastytrade,
 }
 

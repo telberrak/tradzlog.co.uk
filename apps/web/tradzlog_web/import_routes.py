@@ -127,7 +127,7 @@ def import_page(message: str = Query(default=""), error: str = Query(default="")
               <ul class="muted" style="margin:0;padding-left:18px;line-height:1.7">
                 <li><b>Interactive Brokers</b>: Flex Query with the Trades section, CSV.</li>
                 <li><b>MetaTrader 5</b>: History → Report (HTML), or a Deals CSV.</li>
-                <li><b>NinjaTrader</b>: Account Performance → Executions, export CSV.</li>
+                <li><b>NinjaTrader</b>: Position History export (CSV), or Executions from NinjaTrader Desktop. Commissions aren't in the Position History file, so P&amp;L is before commissions.</li>
                 <li><b>Tradovate</b>: Reports → Performance, export CSV.</li>
                 <li><b>tastytrade</b>: History → Transactions, choose the dates, CSV.</li>
                 <li><b>Anything else</b>: a CSV with symbol, date/time, side (or signed quantity), quantity and price columns.</li>
