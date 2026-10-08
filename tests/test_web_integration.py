@@ -527,3 +527,30 @@ def test_options_import_and_undo_removes_created_instruments(client) -> None:
     # Re-importing creates it again, correctly.
     again = upload(client, token, account_id, "options.csv", raw, tz="UTC")
     assert "Import 3 fills" in client.get(f"/settings/import/{again}").text
+
+
+def test_tastytrade_import_with_expiration(client) -> None:
+    from tradzlog_db.models import Instrument, Trade, TradeStatus
+
+    sign_up(client, "Tasty")
+    account_id, token = account_with_csrf(client, "tastytrade")
+    raw = (FIXTURE_DIR / "tastytrade_transactions.csv").read_bytes()
+    batch = upload(client, token, account_id, "tasty.csv", raw, tz="UTC")
+    preview = client.get(f"/settings/import/{batch}").text
+    assert "tastytrade (History: Transactions)" in preview and "EXPIRE/ASSIGN" in preview and "Import 5 fills" in preview
+    client.post(f"/settings/import/{batch}/confirm", data={"csrf_token": token})
+    db = SessionLocal()
+    try:
+        trades = {t.instrument.symbol.split()[0]: t for t in db.scalars(select(Trade).join(Instrument).where(Trade.account_id == account_id)).all()}
+        assert trades["SPY"].metrics.realized_pnl == Decimal("88.7200")   # (5.10 - 4.20) x 100 - 1.28 fees
+        assert trades["IWM"].status == TradeStatus.CLOSED and trades["IWM"].metrics.realized_pnl == Decimal("297.7200")  # expired worthless
+        assert trades["MESZ6"].status == TradeStatus.OPEN
+    finally:
+        db.close()
+
+
+def test_ambiguous_dates_are_flagged_in_the_preview(client) -> None:
+    sign_up(client)
+    account_id, token = account_with_csrf(client, "Dates")
+    batch = upload(client, token, account_id, "dates.csv", b"Symbol,Date/Time,Side,Quantity,Price\nAAPL,03/04/2026 10:00,BUY,1,100\n", tz="UTC")
+    assert "could be read either way" in client.get(f"/settings/import/{batch}").text

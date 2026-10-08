@@ -180,3 +180,32 @@ def test_generic_reads_asset_class_and_multiplier_columns() -> None:
     raw = b"Symbol,Asset Category,Multiplier,Date/Time,Side,Quantity,Price\nGCZ6,Futures,100,2026-10-06 10:00,BUY,1,2400\n"
     (fill_,) = parse_import(raw, "auto", UTC).executions
     assert (fill_.asset_class, fill_.point_value) == ("FUTURES", D("100"))
+
+
+def test_tastytrade_transactions() -> None:
+    result = parse_import((FIXTURES / "tastytrade_transactions.csv").read_bytes(), "auto", UTC)
+    assert result.file_format == "tastytrade" and result.skipped == 1 and not result.problems  # the deposit
+    short_put, call_buy, call_sell, expiry, mes = result.executions
+    assert (short_put.side, short_put.quantity, short_put.price, short_put.point_value) == ("SELL", D("2"), D("1.5"), D("100"))
+    assert short_put.fees == D("2.28") and short_put.asset_class == "OPTIONS" and short_put.broker_id == "1003"
+    assert (call_buy.price, call_sell.price) == (D("4.2"), D("5.1"))  # from cash value, not the signed average
+    assert (expiry.side, expiry.price, expiry.quantity) == ("CLOSE", D("0"), D("2"))
+    assert (mes.symbol, mes.asset_class, mes.point_value, mes.price) == ("MESZ6", "FUTURES", D("5"), D("5800.25"))
+
+
+def test_expiration_closes_whichever_way_the_position_faces() -> None:
+    expire = ImportedExecution(symbol="IWM", executed_at=T0 + timedelta(minutes=9), side="CLOSE", price=D("0"), quantity=D("2"), row_number=9)
+    (short,) = plan([fill("SELL", "2", "1.5", 0, symbol="IWM"), expire])
+    assert short.direction == Direction.SHORT and legs(short) == [("ENTRY", "2"), ("EXIT", "2")] and short.closed_at is not None
+    assert plan([expire]) == []  # nothing open: an expiry alone creates nothing
+
+
+def test_day_first_dates_are_detected_or_chosen() -> None:
+    uk = b"Instrument,Action,Quantity,Price,Time,ID,E/X,Position,Order ID,Name,Commission,Rate,Account,Connection\n" \
+         b"MES 12-26,Buy,1,5800,25/09/2026 09:31:22,a1,Entry,1 L,o1,Buy,0.50,1,Sim,Live\n" \
+         b"MES 12-26,Sell,1,5801,02/10/2026 14:00:00,a2,Exit,-,o2,Sell,0.50,1,Sim,Live\n"
+    result = parse_import(uk, "auto", UTC)
+    assert [f.executed_at.date().isoformat() for f in result.executions] == ["2026-09-25", "2026-10-02"]  # 2 October, not 10 February
+    ambiguous = b"Symbol,Date/Time,Side,Quantity,Price\nAAPL,03/04/2026 10:00,BUY,1,100\n"
+    assert parse_import(ambiguous, "auto", UTC).executions[0].executed_at.month == 3 and "either way" in parse_import(ambiguous, "auto", UTC).date_note
+    assert parse_import(ambiguous, "auto", UTC, date_order="dmy").executions[0].executed_at.month == 4

@@ -26,6 +26,7 @@ FORMATS: dict[str, str] = {
     "mt5": "MetaTrader 5 (Deals, CSV or HTML report)",
     "ninjatrader": "NinjaTrader (Executions)",
     "tradovate": "Tradovate (Performance)",
+    "tastytrade": "tastytrade (History: Transactions)",
 }
 
 FOREX_LOT = Decimal("100000")
@@ -76,6 +77,33 @@ class ParseResult:
     executions: list[ImportedExecution] = field(default_factory=list)
     problems: list[RowProblem] = field(default_factory=list)
     skipped: int = 0  # rows that are not trades (deposits, headers, cancelled fills)
+    date_note: str = ""  # set when slash dates were ambiguous and a date order was assumed
+
+
+@dataclass(frozen=True)
+class Clock:
+    """How to read the file's times: its timezone and, for 03/04-style dates, the date order."""
+
+    tz: tzinfo = UTC
+    day_first: bool = False
+
+    def __call__(self, value: str) -> datetime:
+        return parse_datetime(value, self.tz, self.day_first)
+
+
+SLASH_DATE = re.compile(r"(?<!\d)(\d{1,2})/(\d{1,2})/(\d{4})(?!\d)")
+
+
+def detect_day_first(rows: list[list[str]]) -> bool | None:
+    """True/False when some date settles the order (a part above 12), None if every date is ambiguous."""
+    for row in rows:
+        for cell in row:
+            for first, second, _ in SLASH_DATE.findall(cell):
+                if int(first) > 12 >= int(second):
+                    return True
+                if int(second) > 12 >= int(first):
+                    return False
+    return None
 
 
 class ImportFormatError(ValueError):
@@ -99,17 +127,21 @@ def parse_decimal(value: str | None, default: str | None = "0") -> Decimal | Non
     return -number if negative else number
 
 
-DATETIME_FORMATS = (
+ISO_FORMATS = (
     "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y%m%d %H%M%S", "%Y%m%d %H:%M:%S",
-    "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M", "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M:%S %p",
-    "%m/%d/%Y %I:%M %p", "%d/%m/%Y %H:%M:%S", "%Y-%m-%d", "%Y%m%d", "%m/%d/%Y",
+    "%Y.%m.%d %H:%M:%S", "%Y.%m.%d %H:%M", "%Y-%m-%d", "%Y%m%d",
 )
+MONTH_FIRST = ("%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y")
+DAY_FIRST = ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y %I:%M:%S %p", "%d/%m/%Y %I:%M %p", "%d/%m/%Y")
+DATE_ORDERS = {"auto": "Detect from the file", "mdy": "Month first (03/04/2026 = 4 March)", "dmy": "Day first (03/04/2026 = 3 April)"}
 
 
-def parse_datetime(value: str, tz: tzinfo = UTC) -> datetime:
-    """A timestamp in UTC; values without an offset are read in ``tz``."""
+def parse_datetime(value: str, tz: tzinfo = UTC, day_first: bool = False) -> datetime:
+    """A timestamp in UTC; values without an offset are read in ``tz``. ``day_first`` decides
+    whether 03/04/2026 is 3 April (day first, e.g. UK) or 4 March (month first, US)."""
     text = re.sub(r"\s+", " ", value.strip().replace(";", " ").replace(",", " ")).strip()
-    for fmt in DATETIME_FORMATS:
+    slash = (DAY_FIRST + MONTH_FIRST) if day_first else (MONTH_FIRST + DAY_FIRST)
+    for fmt in ISO_FORMATS + slash:
         try:
             parsed = datetime.strptime(text, fmt)
         except ValueError:
@@ -247,6 +279,8 @@ def is_currency_pair(symbol: str) -> bool:
 
 
 def detect_format(header_keys: set[str]) -> str:
+    if {"instrumenttype", "averageprice", "value"} <= header_keys and header_keys & {"rootsymbol", "underlyingsymbol"}:
+        return "tastytrade"
     if {"tradeprice", "buy/sell"} <= header_keys or "ibcommission" in header_keys:
         return "ibkr_flex"
     if {"buyprice", "sellprice", "boughttimestamp", "soldtimestamp"} <= header_keys:
@@ -273,7 +307,7 @@ GENERIC_ALIASES = {
 }
 
 
-def parse_generic(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseResult) -> None:
+def parse_generic(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
     def pick(row: dict[str, str], name: str) -> str:
         return next((row[alias] for alias in GENERIC_ALIASES[name] if row.get(alias)), "")
 
@@ -284,7 +318,7 @@ def parse_generic(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: Pa
             if side is None:
                 raise ValueError(f"buy or sell not recognised: {pick(row, 'side')!r}")
             multiplier = parse_decimal(pick(row, "multiplier"), default=None)
-            add(result, number, pick(row, "symbol").upper(), parse_datetime(pick(row, "time"), tz), side,
+            add(result, number, pick(row, "symbol").upper(), clock(pick(row, "time")), side,
                 parse_decimal(pick(row, "price")), abs(quantity), abs(parse_decimal(pick(row, "fees"))), pick(row, "broker_id") or None,
                 asset_class=asset_class_from(pick(row, "asset_class")),
                 point_value=multiplier if multiplier and multiplier > 0 else None,
@@ -298,7 +332,7 @@ IBKR_ASSET_CLASSES = {"STK": "STOCK", "FUT": "FUTURES", "CASH": "FOREX", "OPT": 
                       "CRYPTO": "CRYPTO", "CMDTY": "COMMODITY", "CFD": "STOCK", "WAR": "OPTIONS"}
 
 
-def parse_ibkr_flex(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseResult) -> None:
+def parse_ibkr_flex(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
     for number, row in rows:
         if row.get("buy/sell", "").upper() in {"", "BUY/SELL"} or "CA." in row.get("buy/sell", "").upper():
             result.skipped += 1  # repeated headers, cancellations
@@ -313,7 +347,7 @@ def parse_ibkr_flex(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: 
                 symbol = symbol.replace(".", "")
                 quantity, point_value = quantity / FOREX_LOT, FOREX_LOT
             fees = -(parse_decimal(row.get("ibcommission")) + parse_decimal(row.get("taxes")))
-            add(result, number, symbol, parse_datetime(when, tz), normalise_side(row.get("buy/sell")) or "",
+            add(result, number, symbol, clock(when), normalise_side(row.get("buy/sell")) or "",
                 parse_decimal(row.get("tradeprice")), quantity, fees,
                 row.get("ibexecid") or row.get("tradeid") or row.get("iborderid") or None,
                 asset_class=asset_class, point_value=point_value if point_value and point_value > 0 else None,
@@ -333,7 +367,7 @@ def mt_asset_hints(symbol: str) -> tuple[str | None, Decimal | None]:
     return None, None
 
 
-def parse_mt5(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseResult) -> None:
+def parse_mt5(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
     for number, row in rows:
         kind = row.get("type", "").strip().lower()
         if kind not in {"buy", "sell"}:
@@ -342,7 +376,7 @@ def parse_mt5(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseR
         try:
             costs = parse_decimal(row.get("commission")) + parse_decimal(row.get("fee")) + parse_decimal(row.get("swap"))
             asset_class, point_value = mt_asset_hints(row.get("symbol", ""))
-            add(result, number, row.get("symbol", "").upper(), parse_datetime(row.get("time", ""), tz), kind.upper(),
+            add(result, number, row.get("symbol", "").upper(), clock(row.get("time", "")), kind.upper(),
                 parse_decimal(row.get("price")), abs(parse_decimal(row.get("volume"))), -costs, row.get("deal") or None,
                 asset_class=asset_class, point_value=point_value,
                 broker_pnl=parse_decimal(row.get("profit")) + costs)
@@ -350,12 +384,12 @@ def parse_mt5(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseR
             result.problems.append(RowProblem(number, str(problem)))
 
 
-def parse_ninjatrader(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseResult) -> None:
+def parse_ninjatrader(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
     for number, row in rows:
         try:
             symbol = row.get("instrument", "").upper()
             root = futures_root(symbol)
-            add(result, number, symbol, parse_datetime(row.get("time", ""), tz), normalise_side(row.get("action")) or "",
+            add(result, number, symbol, clock(row.get("time", "")), normalise_side(row.get("action")) or "",
                 parse_decimal(row.get("price")), abs(parse_decimal(row.get("quantity"))), abs(parse_decimal(row.get("commission"))),
                 row.get("id") or row.get("orderid") or None,
                 asset_class="FUTURES" if root or re.search(r" \d{2}-\d{2}$", symbol) else None,
@@ -364,15 +398,15 @@ def parse_ninjatrader(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result
             result.problems.append(RowProblem(number, str(problem)))
 
 
-def parse_tradovate(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: ParseResult) -> None:
+def parse_tradovate(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
     """Performance rows are matched round trips: each becomes its buy fill and its sell fill."""
     for number, row in rows:
         try:
             symbol = row.get("symbol", "").upper()
             root = futures_root(symbol)
             quantity = abs(parse_decimal(row.get("qty")))
-            bought = parse_datetime(row.get("boughttimestamp", ""), tz)
-            sold = parse_datetime(row.get("soldtimestamp", ""), tz)
+            bought = clock(row.get("boughttimestamp", ""))
+            sold = clock(row.get("soldtimestamp", ""))
             hints = {"asset_class": "FUTURES", "point_value": FUTURES_POINT_VALUES.get(root) if root else None}
             pnl = parse_decimal(row.get("pnl"), default=None)
             buy_pnl, sell_pnl = (pnl, None) if bought > sold else (None, pnl)  # P&L belongs to the closing fill
@@ -384,12 +418,55 @@ def parse_tradovate(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: 
             result.problems.append(RowProblem(number, str(problem)))
 
 
+TASTY_ASSET_CLASSES = {"equity": "STOCK", "equityoption": "OPTIONS", "future": "FUTURES", "futureoption": "OPTIONS",
+                       "cryptocurrency": "CRYPTO"}
+TASTY_CLOSING_EVENTS = ("expiration", "assignment", "exercise", "cashsettled")
+
+
+def parse_tastytrade(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
+    """History -> Transactions CSV. Trades and receive/deliver events (expirations, assignments)
+    become fills; money movements, dividends and the like are skipped. Prices come from the
+    cash value per unit, which is unambiguous for options (Value = price x quantity x multiplier)."""
+    for number, row in rows:
+        kind = key(row.get("type", ""))
+        if kind not in {"trade", "receivedeliver"}:
+            result.skipped += 1
+            continue
+        try:
+            sub_type = key(row.get("subtype", ""))
+            action = row.get("action", "").upper()
+            side = "BUY" if "BUY" in action else "SELL" if "SELL" in action else None
+            closing_event = kind == "receivedeliver" and sub_type.startswith(TASTY_CLOSING_EVENTS)
+            if side is None:
+                if not closing_event:
+                    raise ValueError(f"buy or sell not recognised: {row.get('action', '')!r}")
+                side = "CLOSE"
+            quantity = abs(parse_decimal(row.get("quantity")))
+            multiplier = parse_decimal(row.get("multiplier"), default=None) or Decimal("1")
+            value = abs(parse_decimal(row.get("value")))
+            average = parse_decimal(row.get("averageprice"), default=None)
+            asset_class = TASTY_ASSET_CLASSES.get(key(row.get("instrumenttype", "")))
+            if value and quantity:
+                price = value / (quantity * multiplier)
+            elif average and asset_class == "FUTURES":
+                price = abs(average)  # futures settle daily: no cash value on the trade line
+            else:
+                price = Decimal("0")  # expired worthless
+            fees = -(parse_decimal(row.get("commissions")) + parse_decimal(row.get("fees")))
+            add(result, number, row.get("symbol", "").upper().lstrip("./"), clock(row.get("date", "")), side,
+                price.quantize(Decimal("0.00000001")), quantity, fees, row.get("order") or None,
+                asset_class=asset_class, point_value=multiplier, currency=(row.get("currency") or "USD").upper())
+        except ValueError as problem:
+            result.problems.append(RowProblem(number, str(problem)))
+
+
 PARSERS = {
     "generic": parse_generic,
     "ibkr_flex": parse_ibkr_flex,
     "mt5": parse_mt5,
     "ninjatrader": parse_ninjatrader,
     "tradovate": parse_tradovate,
+    "tastytrade": parse_tastytrade,
 }
 
 
@@ -397,9 +474,10 @@ def add(result: ParseResult, number: int, symbol: str, executed_at: datetime, si
         quantity: Decimal | None, fees: Decimal | None, broker_id: str | None, **hints) -> None:
     if not symbol:
         raise ValueError("no symbol")
-    if side not in {"BUY", "SELL"}:
+    if side not in {"BUY", "SELL", "CLOSE"}:
         raise ValueError("buy or sell not recognised")
-    if price is None or price <= 0:
+    # Expired and assigned options close at 0; everything else needs a real price.
+    if price is None or price < 0 or (price == 0 and side != "CLOSE"):
         raise ValueError("price must be more than 0")
     if quantity is None or quantity <= 0:
         raise ValueError("quantity must be more than 0")
@@ -430,7 +508,7 @@ def strip_flex_codes(rows: list[list[str]]) -> list[list[str]]:
     return out
 
 
-def parse_import(raw: bytes, file_format: str = "auto", tz: tzinfo = UTC) -> ParseResult:
+def parse_import(raw: bytes, file_format: str = "auto", tz: tzinfo = UTC, date_order: str = "auto") -> ParseResult:
     if not raw.strip():
         raise ImportFormatError("The file is empty.")
     text = decode(raw)
@@ -446,8 +524,16 @@ def parse_import(raw: bytes, file_format: str = "auto", tz: tzinfo = UTC) -> Par
     body = rows[header_index + 1 :]
     if chosen == "mt5" and text.lstrip()[:1] == "<":
         body = mt5_deals_section(body, len(header))
+    detected_day_first = detect_day_first(body)
+    if date_order in {"mdy", "dmy"}:
+        day_first = date_order == "dmy"
+    else:
+        day_first = bool(detected_day_first)
     result = ParseResult(file_format=chosen)
-    PARSERS[chosen](records(header, body, start=header_index + 2), tz, result)
+    if date_order == "auto" and detected_day_first is None and any(SLASH_DATE.search(cell) for row in body[:200] for cell in row):
+        result.date_note = ("Every date in this file could be read either way (like 03/04/2026); they were read month first. "
+                            "If your broker writes the day first, choose Date order: day first and upload again.")
+    PARSERS[chosen](records(header, body, start=header_index + 2), Clock(tz, day_first), result)
     if not result.executions and not result.problems:
         raise ImportFormatError("No trades found in this file. Check the format, or that the export includes trades.")
     return result

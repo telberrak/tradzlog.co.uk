@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import delete, select
 from starlette.concurrency import run_in_threadpool
 
-from tradzlog_api.services.imports import FORMATS, ImportFormatError, parse_import
+from tradzlog_api.services.imports import DATE_ORDERS, FORMATS, ImportFormatError, parse_import
 from tradzlog_api.services.trade_import import (
     UndoNotAllowed,
     apply_import,
@@ -86,6 +86,7 @@ def import_page(message: str = Query(default=""), error: str = Query(default="")
             return shell("Import trades", "settings", body, "Settings", user.name or user.email)
         account_options = "".join(f'<option value="{escape(a.id)}">{escape(a.name)} · {escape(a.broker)}</option>' for a in accounts)
         format_options = "".join(f'<option value="{code}">{escape(label)}</option>' for code, label in FORMATS.items())
+        date_options = "".join(f'<option value="{code}">{escape(label)}</option>' for code, label in DATE_ORDERS.items())
         tz_options = "".join(
             f'<option value="{escape(name)}" {"selected" if name == user.timezone else ""}>{escape(name.replace("_", " "))}</option>'
             for name in timezone_names()
@@ -112,8 +113,11 @@ def import_page(message: str = Query(default=""), error: str = Query(default="")
                 <div class="field"><label for="i-account">Into account</label><select id="i-account" name="account_id" required>{account_options}</select></div>
                 <div class="field"><label for="i-format">File format</label><select id="i-format" name="file_format">{format_options}</select></div>
               </div>
-              <div class="field"><label for="i-tz">Times in the file are in</label><select id="i-tz" name="timezone">{tz_options}</select>
-                <p class="hint">Brokers often export in their own timezone (IBKR: your report setting; MetaTrader: the broker's server time).</p></div>
+              <div class="form-row">
+                <div class="field"><label for="i-tz">Times in the file are in</label><select id="i-tz" name="timezone">{tz_options}</select></div>
+                <div class="field"><label for="i-dates">Date order</label><select id="i-dates" name="date_order">{date_options}</select></div>
+              </div>
+              <p class="hint" style="margin-top:-4px">Brokers often export in their own timezone (IBKR: your report setting). NinjaTrader writes dates in your computer's regional format.</p>
               <div class="field"><label for="i-file">Export file (CSV, or MetaTrader HTML report)</label><input id="i-file" type="file" name="file" accept=".csv,.txt,.htm,.html,text/csv,text/html" /></div>
               <div class="field"><label for="i-paste">…or paste rows (with a header row)</label><textarea id="i-paste" name="pasted" placeholder="Symbol,Date/Time,Side,Quantity,Price,Commission" style="min-height:90px"></textarea></div>
               <div><button class="btn btn-primary" type="submit">Preview import</button> <span class="hint">Nothing is saved until you confirm.</span></div>
@@ -125,6 +129,7 @@ def import_page(message: str = Query(default=""), error: str = Query(default="")
                 <li><b>MetaTrader 5</b>: History → Report (HTML), or a Deals CSV.</li>
                 <li><b>NinjaTrader</b>: Account Performance → Executions, export CSV.</li>
                 <li><b>Tradovate</b>: Reports → Performance, export CSV.</li>
+                <li><b>tastytrade</b>: History → Transactions, choose the dates, CSV.</li>
                 <li><b>Anything else</b>: a CSV with symbol, date/time, side (or signed quantity), quantity and price columns.</li>
               </ul>
               <p class="hint">Re-importing the same file, or an overlapping one, skips fills that are already in the account.</p>
@@ -144,6 +149,7 @@ async def upload_for_preview(
     account_id: str = Form(...),
     file_format: str = Form("auto"),
     timezone: str = Form("UTC"),
+    date_order: str = Form("auto"),
     pasted: str = Form(""),
     file: UploadFile | None = File(default=None),
 ) -> RedirectResponse:
@@ -159,13 +165,13 @@ async def upload_for_preview(
         return back("/settings/import", error="Choose a file or paste some rows.")
     if len(raw) > MAX_FILE_BYTES:
         return back("/settings/import", error="That file is over 5 MB. Export a shorter date range.")
-    if file_format not in FORMATS or not valid_timezone(timezone):
+    if file_format not in FORMATS or date_order not in DATE_ORDERS or not valid_timezone(timezone):
         return back("/settings/import", error="Choose a file format and timezone from the lists.")
     # Parsing and saving can take a while for big files: keep them off the event loop.
-    return await run_in_threadpool(create_preview, account_id, file_format, timezone, file_name, raw)
+    return await run_in_threadpool(create_preview, account_id, file_format, timezone, date_order, file_name, raw)
 
 
-def create_preview(account_id: str, file_format: str, timezone: str, file_name: str, raw: bytes) -> RedirectResponse:
+def create_preview(account_id: str, file_format: str, timezone: str, date_order: str, file_name: str, raw: bytes) -> RedirectResponse:
     db = SessionLocal()
     try:
         user = current_user(db)
@@ -173,7 +179,7 @@ def create_preview(account_id: str, file_format: str, timezone: str, file_name: 
         if account is None:
             return back("/settings/import", error="Account not found.")
         try:
-            result = parse_import(raw, file_format, zone(timezone))
+            result = parse_import(raw, file_format, zone(timezone), date_order)
         except ImportFormatError as problem:
             return back("/settings/import", error=str(problem))
         if len(result.executions) > MAX_ROWS:
@@ -186,6 +192,7 @@ def create_preview(account_id: str, file_format: str, timezone: str, file_name: 
                 "problems": [{"row": p.row_number, "reason": p.reason} for p in result.problems[:500]],
                 "problem_count": len(result.problems),
                 "skipped": result.skipped,
+                "date_note": result.date_note,
             },
         )
         db.add(batch)
@@ -235,7 +242,7 @@ def preview_body(db, batch: BrokerSync, account: Account) -> str:
     )
     fill_rows = "".join(
         f"""<tr><td class="muted">{escape(fmt(fill.executed_at))}</td><td><b>{escape(fill.symbol)}</b></td>
-          <td><span class="badge {'badge-long' if fill.side == 'BUY' else 'badge-short'}">{fill.side}</span></td>
+          <td><span class="badge {'badge-long' if fill.side == 'BUY' else 'badge-short' if fill.side == 'SELL' else ''}">{'EXPIRE/ASSIGN' if fill.side == 'CLOSE' else fill.side}</span></td>
           <td class="num">{escape(number(fill.quantity).rstrip('0').rstrip('.'))}</td><td class="num">{escape(str(fill.price))}</td>
           <td class="num">{money(fill.fees)}</td><td class="muted">{escape(fill.broker_id or '')}</td>
           <td>{'<span class="badge badge-open">New</span>' if print_ in new_prints else '<span class="badge">Already imported</span>'}</td></tr>"""
@@ -256,6 +263,7 @@ def preview_body(db, batch: BrokerSync, account: Account) -> str:
         {kpi("Instruments", f"{len(plan.new_instruments):,} new", "", "added to the shared list")}
         {kpi("Unreadable rows", f"{payload.get('problem_count', 0):,}", "negative" if problems else "", "see below" if problems else "none")}
       </section>
+      {f'<p class="form-error" role="status">{escape(payload["date_note"])}</p>' if payload.get("date_note") else ""}
       {broker_hint}
       <form method="post" action="/settings/import/{escape(batch.id)}/confirm">
         {instruments_html}

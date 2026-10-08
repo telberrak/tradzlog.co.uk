@@ -181,7 +181,13 @@ def walk(fills: list[tuple[ImportedExecution, str]], open_trade: Trade | None) -
     if current:
         planned.append(current)
     for fill, fingerprint in sorted(fills, key=lambda item: (item[0].executed_at, item[0].row_number)):
-        buying = fill.side == "BUY"
+        if fill.side == "CLOSE":
+            # An expiration or assignment: closes the open position, whichever way it faces.
+            if current is None or position == 0:
+                continue  # nothing open here (opened before TradzLog's history): nothing to close
+            buying = current.direction == Direction.SHORT
+        else:
+            buying = fill.side == "BUY"
         remaining, fees = fill.quantity, fill.fees
         while remaining > 0:
             if current is None or position == 0:

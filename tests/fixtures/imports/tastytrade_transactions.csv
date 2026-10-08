@@ -1,0 +1,7 @@
+Date,Type,Sub Type,Action,Symbol,Instrument Type,Description,Value,Quantity,Average Price,Commissions,Fees,Multiplier,Root Symbol,Underlying Symbol,Expiration Date,Strike Price,Call or Put,Order #,Currency
+2026-09-20T14:00:00+0000,Trade,Sell to Open,SELL_TO_OPEN,IWM   261002P00200000,Equity Option,Sold 2 IWM 10/02/26 Put 200.00 @ 1.50,300.00,2,150.00,-2.00,-0.28,100,IWM,IWM,10/2/26,200,PUT,1003,USD
+2026-10-01T14:31:00+0000,Trade,Buy to Open,BUY_TO_OPEN,SPY   261016C00570000,Equity Option,Bought 1 SPY 10/16/26 Call 570.00 @ 4.20,-420.00,1,-420.00,-1.00,-0.14,100,SPY,SPY,10/16/26,570,CALL,1001,USD
+2026-10-02T15:00:00+0000,Trade,Sell to Close,SELL_TO_CLOSE,SPY   261016C00570000,Equity Option,Sold 1 SPY 10/16/26 Call 570.00 @ 5.10,510.00,1,510.00,0.00,-0.14,100,SPY,SPY,10/16/26,570,CALL,1002,USD
+2026-10-02T21:00:00+0000,Receive Deliver,Expiration,,IWM   261002P00200000,Equity Option,Removal of 2.0 IWM 10/02/26 Put 200.00 due to expiration.,0.00,2,0.00,0.00,0.00,100,IWM,IWM,10/2/26,200,PUT,,USD
+2026-10-03T14:00:00+0000,Money Movement,Deposit,,,,ACH DEPOSIT,5000.00,0,,0.00,0.00,,,,,,,,USD
+2026-10-05T14:30:00+0000,Trade,Buy to Open,BUY_TO_OPEN,/MESZ6,Future,Bought 1 /MESZ6 @ 5800.25,0.00,1,5800.25,-0.85,-0.37,5,/MES,/MES,,,,1004,USD
