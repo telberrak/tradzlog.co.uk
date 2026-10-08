@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     feature_community: bool = False
     feature_billing: bool = False
     # Shown on the legal and error pages; must be a mailbox someone reads.
-    support_email: str = "support@tradzlog.com"
+    support_email: str = "tarik.elberrak@datakratos.com"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
