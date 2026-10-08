@@ -423,10 +423,17 @@ TASTY_ASSET_CLASSES = {"equity": "STOCK", "equityoption": "OPTIONS", "future": "
 TASTY_CLOSING_EVENTS = ("expiration", "assignment", "exercise", "cashsettled")
 
 
+TASTY_PRICE = re.compile(r"@\s*([\d,]*\.?\d+)\s*$")
+
+
 def parse_tastytrade(rows: list[tuple[int, dict[str, str]]], clock: Clock, result: ParseResult) -> None:
-    """History -> Transactions CSV. Trades and receive/deliver events (expirations, assignments)
-    become fills; money movements, dividends and the like are skipped. Prices come from the
-    cash value per unit, which is unambiguous for options (Value = price x quantity x multiplier)."""
+    """History -> Transactions CSV. Trades and receive/deliver events (expirations, assignments,
+    stock delivered on assignment) become fills; money movements are skipped.
+
+    Learned from a real export: the fill price is in the description ("... @ 7607.75"); "Value" is
+    the cash effect, which for futures is the day's settlement rather than the trade value; and for
+    options on futures the Multiplier column says 1, so the contract size is derived from the cash
+    value (value / (quantity x price)), or the underlying future's known size."""
     for number, row in rows:
         kind = key(row.get("type", ""))
         if kind not in {"trade", "receivedeliver"}:
@@ -435,27 +442,45 @@ def parse_tastytrade(rows: list[tuple[int, dict[str, str]]], clock: Clock, resul
         try:
             sub_type = key(row.get("subtype", ""))
             action = row.get("action", "").upper()
-            side = "BUY" if "BUY" in action else "SELL" if "SELL" in action else None
-            closing_event = kind == "receivedeliver" and sub_type.startswith(TASTY_CLOSING_EVENTS)
-            if side is None:
-                if not closing_event:
-                    raise ValueError(f"buy or sell not recognised: {row.get('action', '')!r}")
-                side = "CLOSE"
-            quantity = abs(parse_decimal(row.get("quantity")))
-            multiplier = parse_decimal(row.get("multiplier"), default=None) or Decimal("1")
-            value = abs(parse_decimal(row.get("value")))
-            average = parse_decimal(row.get("averageprice"), default=None)
             asset_class = TASTY_ASSET_CLASSES.get(key(row.get("instrumenttype", "")))
-            if value and quantity:
-                price = value / (quantity * multiplier)
-            elif average and asset_class == "FUTURES":
-                price = abs(average)  # futures settle daily: no cash value on the trade line
+            if kind == "receivedeliver" and sub_type.startswith(TASTY_CLOSING_EVENTS):
+                side = "CLOSE"  # expiration/assignment closes the option, whichever way it faced
+            elif "BUY" in action or "SELL" in action:
+                side = "BUY" if "BUY" in action else "SELL"
             else:
-                price = Decimal("0")  # expired worthless
+                raise ValueError(f"buy or sell not recognised: {row.get('action', '')!r}")
+            quantity = abs(parse_decimal(row.get("quantity")))
+            value = abs(parse_decimal(row.get("value")))
+            multiplier = parse_decimal(row.get("multiplier"), default=None)
+            quoted = TASTY_PRICE.search(row.get("description", ""))
+            futures_based = asset_class == "FUTURES" or row.get("underlyingsymbol", "").startswith("/")
+            if value and quantity and not futures_based:
+                # Stocks and equity options: the cash value is exact (the description rounds to cents).
+                price = value / (quantity * (multiplier or Decimal("1")))
+            elif quoted:
+                # Futures and options on futures: the description holds the fill price.
+                price = parse_decimal(quoted.group(1))
+            else:
+                price = Decimal("0")  # expired worthless / assigned option leg
+
+            underlying = row.get("underlyingsymbol", "").lstrip("./")
+            symbol = row.get("symbol", "").upper().lstrip("./")
+            if asset_class == "FUTURES":
+                root = futures_root(symbol)
+                point_value = FUTURES_POINT_VALUES.get(root) if root else None
+            elif asset_class == "OPTIONS" and row.get("underlyingsymbol", "").startswith("/"):
+                if value and quantity and price:
+                    point_value = (value / (quantity * price)).quantize(Decimal("0.0001"))
+                else:
+                    root = futures_root(underlying)
+                    point_value = FUTURES_POINT_VALUES.get(root) if root else None
+            else:
+                point_value = multiplier if multiplier and multiplier > 0 else None
+
             fees = -(parse_decimal(row.get("commissions")) + parse_decimal(row.get("fees")))
-            add(result, number, row.get("symbol", "").upper().lstrip("./"), clock(row.get("date", "")), side,
-                price.quantize(Decimal("0.00000001")), quantity, fees, row.get("order") or None,
-                asset_class=asset_class, point_value=multiplier, currency=(row.get("currency") or "USD").upper())
+            add(result, number, symbol, clock(row.get("date", "")), side, price.quantize(Decimal("0.00000001")), quantity,
+                fees, row.get("order") or None, asset_class=asset_class, point_value=point_value,
+                currency=(row.get("currency") or "USD").upper())
         except ValueError as problem:
             result.problems.append(RowProblem(number, str(problem)))
 

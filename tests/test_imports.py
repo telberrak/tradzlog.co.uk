@@ -209,3 +209,46 @@ def test_day_first_dates_are_detected_or_chosen() -> None:
     ambiguous = b"Symbol,Date/Time,Side,Quantity,Price\nAAPL,03/04/2026 10:00,BUY,1,100\n"
     assert parse_import(ambiguous, "auto", UTC).executions[0].executed_at.month == 3 and "either way" in parse_import(ambiguous, "auto", UTC).date_note
     assert parse_import(ambiguous, "auto", UTC, date_order="dmy").executions[0].executed_at.month == 4
+
+
+def test_tastytrade_real_export_layout_reconciles_to_cash_totals() -> None:
+    """Patterns from a real tastytrade export: futures 'Value' is settlement cash (price only in the
+    description), options on futures say Multiplier 1, expirations carry SELL_TO_CLOSE at 0, and stock
+    descriptions round the price. Every closed position must equal the file's cash Total."""
+    import csv
+    from collections import defaultdict
+
+    path = FIXTURES / "tastytrade_real_layout.csv"
+    result = parse_import(path.read_bytes(), "auto", UTC)
+    assert result.file_format == "tastytrade" and not result.problems and result.skipped == 1
+    cash: dict[str, Decimal] = defaultdict(Decimal)
+    for row in csv.DictReader(path.open(encoding="utf-8")):
+        if row["Type"] in ("Trade", "Receive Deliver"):
+            cash[row["Symbol"].upper().lstrip("./")] += parse_decimal(row["Total"])
+
+    by_symbol: dict[str, list] = defaultdict(list)
+    for index, item in enumerate(result.executions):
+        by_symbol[item.symbol].append((item, f"fp{index}"))
+    nets = {}
+    for symbol, fills in by_symbol.items():
+        point_value = default_instrument(fills[0][0]).point_value
+        net = Decimal("0")
+        for trade in walk(fills, None):
+            entries = [leg for leg in trade.legs if leg.type in {ExecutionType.ENTRY, ExecutionType.ADD}]
+            exits = [leg for leg in trade.legs if leg not in entries]
+            q_in, q_out = sum(leg.quantity for leg in entries), sum(leg.quantity for leg in exits)
+            if not q_in or not q_out:
+                continue  # SNAP: only the sell is in this sample
+            avg_in = sum(leg.fill.price * leg.quantity for leg in entries) / q_in
+            avg_out = sum(leg.fill.price * leg.quantity for leg in exits) / q_out
+            move = (avg_out - avg_in) if trade.direction == Direction.LONG else (avg_in - avg_out)
+            net += move * q_out * point_value - sum(leg.fees for leg in trade.legs)
+        nets[symbol] = net.quantize(Decimal("0.01"))
+
+    assert nets["MESM6"] == cash["MESM6"] == D("-102.84")
+    assert nets["GCZ6 G1WV6 261007C4145"] == cash["GCZ6 G1WV6 261007C4145"] == D("93.58")  # 100 oz, not 1
+    assert nets["QQQ   260717C00709000"] == cash["QQQ   260717C00709000"] == D("-126.12")  # expired worthless
+    assert nets["AAL   260821P00014500"] == cash["AAL   260821P00014500"] == D("116.64")  # put kept, assigned
+    assert nets["AAL"] == cash["AAL"] == D("-193.95")  # stock delivered at 14.50, sold at 13.8705
+    snap = next(item for item in result.executions if item.symbol == "SNAP")
+    assert snap.price == D("5.6724")  # exact, not the description's rounded 5.67
