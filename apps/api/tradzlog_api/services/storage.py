@@ -40,10 +40,20 @@ class Storage(Protocol):
 
     def delete(self, ref: str) -> None: ...
 
+    def read(self, ref: str) -> bytes | None: ...
+
+    def delete_owner(self, owner_id: str) -> int: ...
+
+
+def owner_prefix(prefix: str, owner_id: str) -> str:
+    if not owner_id or "/" in owner_id or owner_id in {".", ".."}:
+        raise ValueError("invalid owner id")
+    return f"{prefix}attachments/{owner_id}/"
+
 
 def object_key(prefix: str, owner_id: str, content_type: str) -> str:
     # Grouped per user so a whole account's files can be listed, exported or deleted together.
-    return f"{prefix}attachments/{owner_id}/{uuid4().hex}{IMAGE_EXTENSIONS[content_type]}"
+    return f"{owner_prefix(prefix, owner_id)}{uuid4().hex}{IMAGE_EXTENSIONS[content_type]}"
 
 
 class LocalStorage:
@@ -62,6 +72,28 @@ class LocalStorage:
             (self.root / ref.removeprefix("local:")).unlink(missing_ok=True)
         elif ref.startswith(LOCAL_URL_PREFIX):
             (self.root / ref.removeprefix(LOCAL_URL_PREFIX)).unlink(missing_ok=True)
+
+    def path_for(self, ref: str) -> Path | None:
+        for marker in ("local:", LOCAL_URL_PREFIX):
+            if ref.startswith(marker):
+                target = (self.root / ref.removeprefix(marker)).resolve()
+                return target if target.is_relative_to(self.root.resolve()) else None
+        return None
+
+    def read(self, ref: str) -> bytes | None:
+        target = self.path_for(ref)
+        return target.read_bytes() if target and target.is_file() else None
+
+    def delete_owner(self, owner_id: str) -> int:
+        folder = self.root / owner_prefix("", owner_id)
+        files = [path for path in folder.rglob("*") if path.is_file()] if folder.is_dir() else []
+        for path in files:
+            path.unlink(missing_ok=True)
+        if folder.is_dir():
+            for directory in sorted(folder.rglob("*"), reverse=True):
+                directory.rmdir()
+            folder.rmdir()
+        return len(files)
 
 
 class S3Storage:
@@ -92,6 +124,29 @@ class S3Storage:
     def delete(self, ref: str) -> None:
         bucket, key = split_s3_ref(ref)
         self.client.delete_object(Bucket=bucket, Key=key)
+
+    def read(self, ref: str) -> bytes | None:
+        if not ref.startswith("s3://"):
+            return None
+        bucket, key = split_s3_ref(ref)
+        try:
+            return self.client.get_object(Bucket=bucket, Key=key)["Body"].read()
+        except self.client.exceptions.NoSuchKey:
+            return None
+
+    def delete_owner(self, owner_id: str) -> int:
+        """Delete every object under the user's prefix (all their screenshots); returns the count."""
+        prefix = owner_prefix(self.prefix, owner_id)
+        deleted = 0
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix):
+            keys = [{"Key": item["Key"]} for item in page.get("Contents", [])]
+            if not keys:
+                continue
+            result = self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": keys, "Quiet": True})
+            if result.get("Errors"):
+                raise RuntimeError(f"could not delete {len(result['Errors'])} files under {prefix}")
+            deleted += len(keys)
+        return deleted
 
 
 def split_s3_ref(ref: str) -> tuple[str, str]:

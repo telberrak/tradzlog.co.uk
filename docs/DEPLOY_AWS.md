@@ -72,8 +72,18 @@ same role as a separate inline policy:
 2. IAM → Roles → `mizan-server` → Add permissions → Create inline policy → JSON → paste →
    name it `tradzlog`.
 
-The policy only allows reading `/tradzlog/*` settings, reading, writing and deleting objects in
-the uploads bucket, and writing backups under `tradzlog/` in the backup bucket.
+The policy only allows reading `/tradzlog/*` settings, listing, reading, writing and deleting
+objects in the uploads bucket, and writing backups under `tradzlog/` in the backup bucket.
+
+Listing (`ListTradzlogScreenshots`, added for account deletion in M4) lets the app sweep a deleted
+user's whole `attachments/<user id>/` folder. Without it, deletion still removes every screenshot
+the database knows about and logs a warning for the sweep. To add it to an existing policy:
+IAM → Roles → `mizan-server` → `tradzlog` → Edit → JSON, add the statement, Save.
+
+Backups should not outlive deleted accounts by more than the 30 days the privacy notice promises.
+Local copies are kept 14 days; for the S3 copies, add a lifecycle rule on the backup bucket:
+S3 → backup bucket → Management → Create lifecycle rule → prefix `tradzlog/` → Expire current
+versions after 30 days (and permanently delete noncurrent versions after 1 day if versioning is on).
 
 ### Let containers use the role
 

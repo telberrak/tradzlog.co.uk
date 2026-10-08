@@ -510,6 +510,7 @@ def shell(
                 <a href="/settings/profile">Profile</a>
                 <a href="/settings/accounts">Trading accounts</a>
                 <a href="/settings/security">Security</a>
+                <a href="/settings/data">Your data</a>
                 <form method="post" action="/logout"><button type="submit">Sign out</button></form>
               </div>
             </details>

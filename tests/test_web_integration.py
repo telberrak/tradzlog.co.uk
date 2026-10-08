@@ -611,3 +611,107 @@ def test_commission_per_side_for_files_without_fees(client) -> None:
                       data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": "UTC", "commission_per_side": "-1"},
                       files={"file": ("nt.csv", raw, "text/csv")}, follow_redirects=False)
     assert "error=" in bad.headers["location"]
+
+
+# --------------------------------------------------------------------- your data (export and deletion)
+
+
+def test_export_then_delete_account(client) -> None:
+    import io
+    import json
+    import zipfile
+
+    from tradzlog_api.services import storage
+    from tradzlog_db.models import Account, Attachment, Instrument, JournalEntry, Trade, User, WebSession
+
+    marker = f"gdpr{uuid4().hex[:8]}"
+    email = sign_up(client, "Leaver")
+    ids = seed_private_book(email, marker)
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == email))
+        user_id = user.id
+        ref = db.scalar(select(Attachment.url).where(Attachment.trade_id == ids["trade_id"]))
+        instrument_id = db.get(Trade, ids["trade_id"]).instrument_id
+    finally:
+        db.close()
+    screenshot = storage.LOCAL_ROOT / ref.removeprefix("local:")
+    screenshot.parent.mkdir(parents=True, exist_ok=True)
+    screenshot.write_bytes(b"\x89PNG\r\n\x1a\n" + marker.encode())
+
+    with new_client() as bystander:
+        bystander_email = sign_up(bystander, "Stays")
+        bystander_ids = seed_private_book(bystander_email, f"keep{uuid4().hex[:8]}")
+
+    page = client.get("/settings/data")
+    assert "Download ZIP" in page.text and "Delete my account" in page.text
+    token = csrf_from(page.text)
+
+    export = client.post("/settings/data/export", data={"csrf_token": token})
+    assert export.status_code == 200 and export.headers["content-type"] == "application/zip"
+    assert "attachment; filename=\"tradzlog-export-" in export.headers["content-disposition"]
+    archive = zipfile.ZipFile(io.BytesIO(export.content))
+    document = json.loads(archive.read("tradzlog-export.json"))
+    tables = document["tables"]
+    assert tables["users"][0]["email"] == email and "hashed_password" not in tables["users"][0]
+    assert tables["web_sessions"] and all("token_hash" not in row for row in tables["web_sessions"])
+    assert [row["id"] for row in tables["trades"]] == [ids["trade_id"]]
+    assert tables["trades"][0]["notes"] == f"{marker}-notes" and tables["journal_entries"][0]["title"] == f"{marker}-journal"
+    assert len(tables["executions"]) == 1 and tables["executions"][0]["price"] == "100.00000000"
+    attachment_id = tables["attachments"][0]["id"]
+    assert archive.read(f"screenshots/{attachment_id}.png") == screenshot.read_bytes()
+    assert f"{marker}-account" in archive.read("csv/accounts.csv").decode()
+    assert "keep" not in json.dumps(tables)  # nothing of the other user
+
+    # Refused without the confirmation word or with the wrong password; nothing is deleted.
+    for form, problem in (({"password": "correct-horse-1", "confirm": "yes"}, "Type DELETE"),
+                          ({"password": "wrong-password", "confirm": "DELETE"}, "password is incorrect")):
+        refused = client.post("/settings/data/delete", data={"csrf_token": token, **form}, follow_redirects=True)
+        assert problem in refused.text
+    assert screenshot.exists()
+
+    deleted = client.post("/settings/data/delete", data={"csrf_token": token, "password": "correct-horse-1", "confirm": "delete"},
+                          follow_redirects=False)
+    assert deleted.headers["location"] == "/account-deleted"
+    assert "Your account has been deleted" in client.get("/account-deleted").text
+    assert client.get("/dashboard", follow_redirects=False).status_code == 303  # signed out
+    assert not screenshot.exists()
+
+    db = SessionLocal()
+    try:
+        assert db.get(User, user_id) is None
+        for model, column in ((Account, Account.user_id), (Trade, Trade.user_id), (JournalEntry, JournalEntry.user_id), (WebSession, WebSession.user_id)):
+            assert db.scalar(select(model).where(column == user_id)) is None, model.__name__
+        assert db.scalar(select(Attachment).where(Attachment.trade_id == ids["trade_id"])) is None
+        assert db.get(Instrument, instrument_id) is not None  # hand-made instruments stay in the shared catalogue
+        assert db.get(Trade, bystander_ids["trade_id"]) is not None
+    finally:
+        db.close()
+
+    signin = client.post("/login", data={"email": email, "password": "correct-horse-1", "next": "/"}, headers=ORIGIN, follow_redirects=False)
+    assert signin.status_code != 303
+
+
+def test_deleting_an_account_removes_instruments_only_its_imports_created(client) -> None:
+    from tradzlog_db.models import Instrument
+
+    sign_up(client, "Importer")
+    account_id, token = account_with_csrf(client)
+    symbol = f"Q{uuid4().hex[:5].upper()}"
+    csv_text = (f"symbol,side,quantity,price,time,fees\n{symbol},BUY,10,5.00,2026-03-02 10:00:00,0\n"
+                f"{symbol},SELL,10,6.00,2026-03-02 11:00:00,0\n")
+    batch = upload(client, token, account_id, "fills.csv", csv_text.encode(), tz="UTC")
+    confirmed = client.post(f"/settings/import/{batch}/confirm", data={"csrf_token": token}, follow_redirects=False)
+    assert confirmed.status_code == 303
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Instrument).where(Instrument.symbol == symbol)) is not None
+    finally:
+        db.close()
+
+    client.post("/settings/data/delete", data={"csrf_token": token, "password": "correct-horse-1", "confirm": "DELETE"})
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Instrument).where(Instrument.symbol == symbol)) is None
+    finally:
+        db.close()

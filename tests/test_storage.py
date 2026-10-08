@@ -30,6 +30,19 @@ class FakeS3:
     def generate_presigned_url(self, operation: str, Params: dict[str, str], ExpiresIn: int) -> str:  # noqa: N803
         return f"https://{Params['Bucket']}.s3.amazonaws.com/{Params['Key']}?op={operation}&expires={ExpiresIn}"
 
+    def get_paginator(self, name: str) -> "FakeS3":
+        assert name == "list_objects_v2"
+        return self
+
+    def paginate(self, Bucket: str, Prefix: str) -> list[dict[str, Any]]:  # noqa: N803
+        keys = sorted(key for bucket, key in self.objects if bucket == Bucket and key.startswith(Prefix))
+        return [{"Contents": [{"Key": key} for key in keys[i:i + 2]]} for i in range(0, len(keys), 2)] or [{}]
+
+    def delete_objects(self, Bucket: str, Delete: dict[str, Any]) -> dict[str, Any]:  # noqa: N803
+        for item in Delete["Objects"]:
+            self.objects.pop((Bucket, item["Key"]), None)
+        return {}
+
 
 def test_sniff_image_type_trusts_bytes_not_names() -> None:
     assert storage.sniff_image_type(PNG) == "image/png"
@@ -120,3 +133,27 @@ def test_upload_rejects_disguised_files_and_unlinked_uploads(monkeypatch) -> Non
     monkeypatch.setattr(web_main, "MAX_UPLOAD_BYTES", 16)
     with pytest.raises(HTTPException, match="too large"):
         run_upload(monkeypatch, upload(PNG, "image/png"))
+
+
+def test_s3_delete_owner_removes_only_that_users_files() -> None:
+    fake = FakeS3()
+    s3 = storage.S3Storage("bucket", "prod", client=fake)
+    mine = [s3.save("user-1", PNG, "image/png") for _ in range(3)]
+    theirs = s3.save("user-10", PNG, "image/png")  # a prefix of user-1's id must not match
+    assert s3.delete_owner("user-1") == 3
+    assert [key for _, key in fake.objects] == [storage.split_s3_ref(theirs)[1]]
+    assert all(storage.split_s3_ref(ref)[1] not in {key for _, key in fake.objects} for ref in mine)
+    with pytest.raises(ValueError):
+        s3.delete_owner("../x")
+
+
+def test_local_storage_read_and_delete_owner(tmp_path) -> None:
+    local = storage.LocalStorage(tmp_path)
+    ref = local.save("user-1", JPEG, "image/jpeg")
+    other = local.save("user-2", PNG, "image/png")
+    assert local.read(ref) == JPEG
+    assert local.read("local:../../etc/passwd") is None
+    assert local.read("s3://bucket/key") is None
+    assert local.delete_owner("user-1") == 1
+    assert local.read(ref) is None and local.read(other) == PNG
+    assert local.delete_owner("user-1") == 0

@@ -64,6 +64,7 @@ from tradzlog_web import book, localtime
 from tradzlog_web.account_routes import router as account_router
 from tradzlog_web.auth import LoginRequired, current_user, web_auth
 from tradzlog_web.context import CURRENT_USER_ID
+from tradzlog_web.data_routes import router as data_router
 from tradzlog_web.components import (
     edge_bars,
     equity_chart,
@@ -111,6 +112,7 @@ app.include_router(public_router)
 app.include_router(account_router)
 app.include_router(settings_router)
 app.include_router(import_router)
+app.include_router(data_router)
 
 
 @app.exception_handler(LoginRequired)
@@ -147,6 +149,8 @@ WEB_SENSITIVE_POSTS = {
     "/login",
     "/signup",
     "/settings/security/password",
+    "/settings/data/export",
+    "/settings/data/delete",
     "/settings/billing/checkout",
     "/settings/billing/portal",
     "/community/leaderboard",

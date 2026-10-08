@@ -21,6 +21,12 @@
       "Resource": "arn:aws:s3:::TRADZLOG_UPLOADS_BUCKET/*"
     },
     {
+      "Sid": "ListTradzlogScreenshots",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::TRADZLOG_UPLOADS_BUCKET"
+    },
+    {
       "Sid": "TradzlogBackups",
       "Effect": "Allow",
       "Action": "s3:PutObject",
