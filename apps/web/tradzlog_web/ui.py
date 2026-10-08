@@ -478,6 +478,17 @@ def sidebar_nav(active: str) -> str:
     return "".join(links)
 
 
+def coaching_notice(active: str) -> str:
+    """AI coaching reviews past trades; say plainly on every coaching page that it is not advice."""
+    if active != "coaching":
+        return ""
+    return (
+        '<p class="hint coach-disclaimer">AI coaching is generated automatically from your own trade history. '
+        'It can be wrong, and it is not financial advice or a recommendation to trade. '
+        '<a href="/legal/risk">Risk disclaimer</a></p>'
+    )
+
+
 def shell(
     title: str,
     active: str,
@@ -530,7 +541,7 @@ def shell(
             </details>
           </div>
         </header>
-        <main class="page-content">{body}</main>
+        <main class="page-content">{body}{coaching_notice(active)}</main>
       </div>
     </div>
     <script>{THEME_TOGGLE_SCRIPT}{ROW_LINK_SCRIPT}</script>

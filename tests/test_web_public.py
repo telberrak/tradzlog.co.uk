@@ -78,3 +78,10 @@ def test_feature_switches(monkeypatch) -> None:
     assert not feature_disabled("/trades/t1/share") and feature_disabled("/settings/billing")
     monkeypatch.setattr(settings, "feature_billing", True)
     assert not feature_disabled("/settings/billing/portal")
+
+
+def test_coaching_pages_say_it_is_not_advice() -> None:
+    from tradzlog_web.ui import shell
+
+    assert "not financial advice" in shell("AI Coaching", "coaching", "<p>review</p>")
+    assert "not financial advice" not in shell("Trades", "trades", "<p>list</p>")
