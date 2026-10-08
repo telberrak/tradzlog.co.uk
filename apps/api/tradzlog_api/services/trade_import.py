@@ -22,11 +22,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from tradzlog_api.services.analytics import rebuild_daily_stats, rebuild_equity_curve
 from tradzlog_api.services.imports import (
+    EQUITY_OPTION_MULTIPLIER,
     FOREX_LOT,
     FUTURES_POINT_VALUES,
     ImportedExecution,
     futures_root,
     is_currency_pair,
+    is_occ_option,
 )
 from tradzlog_api.services.metrics import compute_trade_metrics
 from tradzlog_db.models import (
@@ -115,7 +117,10 @@ class NewInstrument:
 
 def default_instrument(fill: ImportedExecution) -> NewInstrument:
     root = futures_root(fill.symbol)
-    if fill.asset_class:
+    occ = is_occ_option(fill.symbol)
+    if occ and fill.asset_class in {None, "STOCK", "OPTIONS"}:
+        asset_class = AssetClass.OPTIONS
+    elif fill.asset_class:
         asset_class = AssetClass(fill.asset_class)
     elif root:
         asset_class = AssetClass.FUTURES
@@ -124,6 +129,8 @@ def default_instrument(fill: ImportedExecution) -> NewInstrument:
     else:
         asset_class = AssetClass.STOCK
     point_value = fill.point_value or (FUTURES_POINT_VALUES.get(root) if root else None)
+    if point_value is None and occ:
+        point_value = EQUITY_OPTION_MULTIPLIER  # standard US equity/index option: 100 shares per contract
     if point_value is None and asset_class == AssetClass.FOREX:
         point_value = FOREX_LOT
     # Stocks and crypto move 1:1; anything else without a known multiplier must be checked.
@@ -329,7 +336,8 @@ def apply_import(
     summary = {
         "rows": plan.total_rows, "duplicates": plan.duplicates, "fills_imported": len(plan.new_fills),
         "trades_opened": plan.trades_opened, "trades_continued": plan.trades_continued, "trades_closed": plan.trades_closed,
-        "instruments_created": sorted(instruments), "tradzlog_pnl": str(pnl),
+        "instruments_created": sorted(instruments), "instrument_ids_created": sorted(i.id for i in instruments.values()),
+        "tradzlog_pnl": str(pnl),
         "broker_pnl": None if plan.broker_pnl is None else str(plan.broker_pnl),
     }
     batch.status = BrokerSyncStatus.SUCCESS
@@ -379,6 +387,30 @@ def undo_import(db: Session, batch: BrokerSync, account: Account) -> dict[str, i
             refresh_trade(db, trade)
             updated += 1
     rebuild_account_stats(db, account)
+    removed_instruments = remove_unused_instruments(db, batch)
     batch.undone_at = datetime.now(UTC)
-    batch.summary = {**(batch.summary or {}), "undone_fills": removed_fills, "undone_trades_deleted": deleted, "undone_trades_reopened": updated}
-    return {"fills": removed_fills, "trades_deleted": deleted, "trades_updated": updated}
+    batch.summary = {**(batch.summary or {}), "undone_fills": removed_fills, "undone_trades_deleted": deleted,
+                     "undone_trades_reopened": updated, "undone_instruments_removed": removed_instruments}
+    return {"fills": removed_fills, "trades_deleted": deleted, "trades_updated": updated, "instruments_removed": len(removed_instruments)}
+
+
+def remove_unused_instruments(db: Session, batch: BrokerSync) -> list[str]:
+    """Delete instruments this import created that no trade uses any more (so a corrected
+    re-import can create them again with the right settings)."""
+    summary = batch.summary or {}
+    query = select(Instrument)
+    if summary.get("instrument_ids_created") is not None:
+        query = query.where(Instrument.id.in_(summary["instrument_ids_created"]))
+    elif summary.get("instruments_created") and batch.imported_at:
+        # Older imports recorded only symbols: match instruments created while that import was confirmed.
+        query = query.where(Instrument.symbol.in_(summary["instruments_created"]),
+                            Instrument.created_at >= batch.created_at, Instrument.created_at <= batch.imported_at)
+    else:
+        return []
+    removed = []
+    db.flush()
+    for instrument in db.scalars(query).all():
+        if db.scalar(select(Trade.id).where(Trade.instrument_id == instrument.id).limit(1)) is None:
+            removed.append(instrument.symbol)
+            db.delete(instrument)
+    return sorted(removed)

@@ -388,6 +388,6 @@ def undo(batch_id: str) -> RedirectResponse:
         except UndoNotAllowed as reason:
             return back(f"/settings/import/{batch_id}", error=str(reason))
         db.commit()
-        return back(f"/settings/import/{batch_id}", message=f"Undone: {result['fills']:,} fills and {result['trades_deleted']:,} trades removed.")
+        return back(f"/settings/import/{batch_id}", message=f"Undone: {result['fills']:,} fills, {result['trades_deleted']:,} trades and {result['instruments_removed']:,} unused instruments removed.")
     finally:
         db.close()

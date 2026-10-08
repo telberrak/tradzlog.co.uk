@@ -483,3 +483,47 @@ def test_import_reports_unreadable_rows_and_rejects_bad_files(client) -> None:
     bad = client.post("/settings/import/preview", data={"csrf_token": token, "account_id": account_id, "file_format": "auto", "timezone": "UTC"},
                       files={"file": ("x.csv", b"hello,world\n", "text/csv")}, follow_redirects=False)
     assert "error=" in bad.headers["location"]
+
+
+def test_options_import_and_undo_removes_created_instruments(client) -> None:
+    from tradzlog_db.models import Instrument, Trade
+
+    sign_up(client, "Options")
+    account_id, token = account_with_csrf(client, "IBKR options")
+    root = f"Q{uuid4().hex[:3].upper()}"
+    occ = f"{root:<6}261008P00755000"
+    raw = (f"Symbol,Date/Time,Quantity,Price,Commission,TradeID,Realized P/L\n"
+           f"{occ},2026-10-06 10:00:00,1,3.13,-0.75,{root}1,0\n"
+           f"{occ},2026-10-06 12:00:00,1,1.39,-0.75,{root}2,0\n"
+           f"{occ},2026-10-07 10:00:00,-2,1.09,-1.10,{root}3,-236.60\n").encode()
+
+    batch = upload(client, token, account_id, "options.csv", raw, tz="UTC")
+    client.post(f"/settings/import/{batch}/confirm", data={"csrf_token": token})
+    summary = client.get(f"/settings/import/{batch}").text
+    assert "matches" in summary  # TradzLog P&L equals the broker's -236.60
+
+    db = SessionLocal()
+    try:
+        instrument = db.scalar(select(Instrument).where(Instrument.symbol == occ))
+        assert instrument.asset_class.value == "OPTIONS" and instrument.point_value == Decimal("100")
+        trade = db.scalar(select(Trade).where(Trade.account_id == account_id))
+        assert trade.metrics.realized_pnl == Decimal("-236.6000")  # (1.09 - 2.26) x 2 x 100 - 2.60 fees
+        # Simulate an import made before instrument ids were recorded: undo must use the symbol fallback.
+        from tradzlog_db.models import BrokerSync
+        record = db.get(BrokerSync, batch)
+        record.summary = {key: value for key, value in record.summary.items() if key != "instrument_ids_created"}
+        db.commit()
+    finally:
+        db.close()
+
+    undone = client.post(f"/settings/import/{batch}/undo", data={"csrf_token": token}, follow_redirects=False)
+    assert "1%20unused%20instruments%20removed" in undone.headers["location"]
+    db = SessionLocal()
+    try:
+        assert db.scalar(select(Instrument).where(Instrument.symbol == occ)) is None
+    finally:
+        db.close()
+
+    # Re-importing creates it again, correctly.
+    again = upload(client, token, account_id, "options.csv", raw, tz="UTC")
+    assert "Import 3 fills" in client.get(f"/settings/import/{again}").text

@@ -217,6 +217,27 @@ def futures_root(symbol: str) -> str | None:
     return next((root for root in candidates if root in FUTURES_POINT_VALUES), None)
 
 
+# OCC option symbol: root (up to 6, often space-padded), YYMMDD, C/P, strike x1000 (8 digits).
+OCC_OPTION = re.compile(r"^[A-Z0-9.]{1,6}\s*\d{6}[CP]\d{8}$")
+EQUITY_OPTION_MULTIPLIER = Decimal("100")
+
+
+def is_occ_option(symbol: str) -> bool:
+    return bool(OCC_OPTION.match(symbol.upper().strip()))
+
+
+ASSET_CLASS_WORDS = {
+    "STK": "STOCK", "STOCK": "STOCK", "STOCKS": "STOCK", "EQUITY": "STOCK", "ETF": "STOCK", "CFD": "STOCK",
+    "OPT": "OPTIONS", "OPTION": "OPTIONS", "OPTIONS": "OPTIONS", "EQUITYANDINDEXOPTIONS": "OPTIONS", "FOP": "OPTIONS",
+    "FUT": "FUTURES", "FUTURE": "FUTURES", "FUTURES": "FUTURES", "CASH": "FOREX", "FOREX": "FOREX", "FX": "FOREX",
+    "CRYPTO": "CRYPTO", "CRYPTOCURRENCY": "CRYPTO", "CMDTY": "COMMODITY", "COMMODITY": "COMMODITY", "COMMODITIES": "COMMODITY",
+}
+
+
+def asset_class_from(value: str | None) -> str | None:
+    return ASSET_CLASS_WORDS.get(re.sub(r"[^A-Z]", "", (value or "").upper()))
+
+
 def is_currency_pair(symbol: str) -> bool:
     letters = re.sub(r"[^A-Z]", "", symbol.upper())[:6]
     return len(letters) == 6 and letters[:3] in CURRENCIES and letters[3:] in CURRENCIES
@@ -244,7 +265,11 @@ GENERIC_ALIASES = {
     "price": {"price", "fillprice", "avgprice", "averageprice", "executionprice", "tradeprice"},
     "quantity": {"quantity", "qty", "shares", "contracts", "size", "volume", "filledqty", "amount"},
     "fees": {"fees", "fee", "commission", "commissions", "costs"},
-    "broker_id": {"orderid", "order", "brokerid", "executionid", "execid", "fillid", "tradeid", "id", "dealid"},
+    "broker_id": {"orderid", "order", "brokerid", "executionid", "execid", "ibexecid", "fillid", "tradeid", "id", "dealid"},
+    "multiplier": {"multiplier", "mult", "contractsize", "pointvalue"},
+    "asset_class": {"assetclass", "assetcategory", "sectype", "securitytype", "instrumenttype", "assettype"},
+    "broker_pnl": {"realizedp/l", "realizedpl", "realizedpnl", "fifopnlrealized", "realisedpnl", "realizedprofit", "netpnl"},
+    "currency": {"currency", "currencyprimary"},
 }
 
 
@@ -258,8 +283,13 @@ def parse_generic(rows: list[tuple[int, dict[str, str]]], tz: tzinfo, result: Pa
             side = normalise_side(pick(row, "side")) or ("SELL" if quantity < 0 else "BUY" if quantity > 0 and not pick(row, "side") else None)
             if side is None:
                 raise ValueError(f"buy or sell not recognised: {pick(row, 'side')!r}")
+            multiplier = parse_decimal(pick(row, "multiplier"), default=None)
             add(result, number, pick(row, "symbol").upper(), parse_datetime(pick(row, "time"), tz), side,
-                parse_decimal(pick(row, "price")), abs(quantity), abs(parse_decimal(pick(row, "fees"))), pick(row, "broker_id") or None)
+                parse_decimal(pick(row, "price")), abs(quantity), abs(parse_decimal(pick(row, "fees"))), pick(row, "broker_id") or None,
+                asset_class=asset_class_from(pick(row, "asset_class")),
+                point_value=multiplier if multiplier and multiplier > 0 else None,
+                currency=pick(row, "currency").upper() or None,
+                broker_pnl=parse_decimal(pick(row, "broker_pnl"), default=None))
         except ValueError as problem:
             result.problems.append(RowProblem(number, str(problem)))
 

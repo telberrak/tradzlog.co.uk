@@ -162,3 +162,21 @@ def test_new_instrument_defaults() -> None:
     unknown = default_instrument(ImportedExecution(symbol="US30", executed_at=T0, side="BUY", price=D("1"), quantity=D("1"), asset_class="FUTURES"))
     assert unknown.needs_review and unknown.point_value == D("1")
     assert not default_instrument(fill("BUY", "1", "1", 0, symbol="AAPL")).needs_review
+
+
+def test_options_by_occ_symbol_get_a_100_multiplier() -> None:
+    raw = (b"Symbol,Date/Time,Quantity,Price,Commission,TradeID,Realized P/L\n"
+           b"QQQ   261008P00755000,2026-10-06 10:00:00,1,3.13,-0.75,1,0\n"
+           b"QQQ   261008P00755000,2026-10-06 12:00:00,1,1.39,-0.75,2,0\n"
+           b"QQQ   261008P00755000,2026-10-07 10:00:00,-2,1.09,-1.10,3,-236.60\n")
+    result = parse_import(raw, "auto", UTC)
+    assert result.file_format == "generic" and [f.side for f in result.executions] == ["BUY", "BUY", "SELL"]
+    assert result.executions[2].broker_pnl == D("-236.60")
+    spec = default_instrument(result.executions[0])
+    assert (spec.asset_class, spec.point_value, spec.needs_review) == (AssetClass.OPTIONS, D("100"), False)
+
+
+def test_generic_reads_asset_class_and_multiplier_columns() -> None:
+    raw = b"Symbol,Asset Category,Multiplier,Date/Time,Side,Quantity,Price\nGCZ6,Futures,100,2026-10-06 10:00,BUY,1,2400\n"
+    (fill_,) = parse_import(raw, "auto", UTC).executions
+    assert (fill_.asset_class, fill_.point_value) == ("FUTURES", D("100"))
