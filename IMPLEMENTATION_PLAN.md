@@ -1,6 +1,6 @@
 # TradzLog Implementation Plan
 
-Goal: take TradzLog from a working single-user product to a paid SaaS at **tradzlog.co.uk**,
+Goal: take TradzLog from a working single-user product to a paid SaaS at **tradzlog.com**,
 hosted on the existing AWS EC2 instance next to Mizan, with screenshots in S3.
 
 Last updated: 8 October 2026. The previous feature-by-feature plan is in git history
@@ -42,7 +42,7 @@ Last updated: 8 October 2026. The previous feature-by-feature plan is in git his
 
 | #  | Milestone                       | Outcome                                                  | Effort\*  | Depends on |
 | -- | ------------------------------- | -------------------------------------------------------- | --------- | ---------- |
-| M0 | Private beta on AWS             | Live at tradzlog.co.uk behind a password, for you only   | 1–2 days  | —          |
+| M0 | Private beta on AWS             | Live at tradzlog.com behind a password, for you only   | 1–2 days  | —          |
 | M1 | Real accounts and sign-in       | Many users, each seeing only their own data              | 5–7 days  | M0         |
 | M2 | Billing and plan limits         | Stripe subscriptions, enforced plans, honest pricing     | 4–5 days  | M1         |
 | M3 | Broker import                   | Traders bring their history in minutes                   | 5–8 days  | M1         |
@@ -79,7 +79,7 @@ continuously rather than in one risky first deploy.
    policy and metadata hop limit, `install.sh`, Parameter Store, DNS, GitHub secrets, then push.
 5. **Watch memory** for a week (`docker stats`, `free -m`). Move to t4g.medium if swap is in steady use.
 
-**Done when** `https://tradzlog.co.uk` asks for the beta password, you can log trades and upload a
+**Done when** `https://tradzlog.com` asks for the beta password, you can log trades and upload a
 screenshot, `/api/health` is green in an uptime monitor, and a nightly backup has landed in S3.
 
 ---

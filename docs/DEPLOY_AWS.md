@@ -109,7 +109,7 @@ Each deploy writes them to `/srv/tradzlog/.env`; never edit that file on the ser
 
 | Parameter                  | Required | Value                                                                    |
 | -------------------------- | -------- | ------------------------------------------------------------------------ |
-| `TRADZLOG_DOMAIN`          | yes      | `tradzlog.co.uk` (www redirects to it)                                   |
+| `TRADZLOG_DOMAIN`          | yes      | `tradzlog.com` (www redirects to it)                                   |
 | `POSTGRES_PASSWORD`        | yes      | 16+ letters/digits; set once, see below                                  |
 | `JWT_SECRET`               | yes      | 32+ random characters                                                    |
 | `S3_BUCKET`                | yes      | the bucket from step 1                                                   |
@@ -140,7 +140,7 @@ docker run --rm -it caddy:2 caddy hash-password
 Store each one, for example:
 
 ```bash
-aws ssm put-parameter --region eu-west-2 --type SecureString --overwrite --name /tradzlog/TRADZLOG_DOMAIN --value "tradzlog.co.uk"
+aws ssm put-parameter --region eu-west-2 --type SecureString --overwrite --name /tradzlog/TRADZLOG_DOMAIN --value "tradzlog.com"
 ```
 
 `tradzlog-config` refuses to write anything if a required value is missing, if
@@ -149,7 +149,7 @@ with (PostgreSQL keeps the first one). Choose it once.
 
 ## 5. DNS
 
-At your DNS provider, add **A** records for `tradzlog.co.uk` and `www.tradzlog.co.uk` pointing
+At your DNS provider, add **A** records for `tradzlog.com` and `www.tradzlog.com` pointing
 at the instance's Elastic IP (the same address Mizan uses). Caddy gets the HTTPS certificates
 on the first deploy once DNS resolves.
 
@@ -183,7 +183,7 @@ The database starts empty and sign-up is invite-only. Register your user through
 gated) with `REGISTRATION_INVITE_CODE`, then open the site with the basic-auth username and password:
 
 ```bash
-curl -sS https://tradzlog.co.uk/api/auth/register -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"a-strong-password","name":"Your Name","invite_code":"YOUR-INVITE-CODE"}'
+curl -sS https://tradzlog.com/api/auth/register -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"a-strong-password","name":"Your Name","invite_code":"YOUR-INVITE-CODE"}'
 ```
 
 Create your trading accounts as described in the README (API docs are not exposed publicly;
@@ -203,4 +203,4 @@ On the server, as `deploy`, in `/srv/tradzlog`:
 | Restore a backup        | `gunzip -c /var/backups/tradzlog/FILE.sql.gz \| docker compose exec -T postgres psql -U tradzlog tradzlog` |
 | Run a specific version  | set `TRADZLOG_TAG` in `.env` to a commit SHA, then `docker compose up -d`   |
 
-Point an uptime monitor at `https://tradzlog.co.uk/api/health` (checks the database too; not behind the gate).
+Point an uptime monitor at `https://tradzlog.com/api/health` (checks the database too; not behind the gate).
