@@ -35,6 +35,35 @@ jobs:
           JWT_SECRET: ci-only-secret-that-is-long-enough-1234567890
         run: python scripts/verify_environment.py --skip-network
 
+  # Every model change must ship with a migration, and migrations must apply and roll back cleanly.
+  migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tradzlog
+          POSTGRES_PASSWORD: tradzlog
+          POSTGRES_DB: tradzlog
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U tradzlog" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg://tradzlog:tradzlog@localhost:5432/tradzlog
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: pip install -e .
+      - run: alembic upgrade head
+      - name: Models match migrations
+        run: alembic check
+      - run: alembic downgrade base
+      - run: alembic upgrade head
+
   deploy-config:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -52,7 +81,7 @@ jobs:
 
   # Multi-arch image: arm64 for the Graviton EC2 instance, amd64 for everything else.
   image:
-    needs: [test, deploy-config]
+    needs: [test, migrations, deploy-config]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 30

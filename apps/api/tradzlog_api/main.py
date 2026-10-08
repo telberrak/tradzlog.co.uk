@@ -1,3 +1,4 @@
+import hmac
 import logging
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -244,8 +245,18 @@ def consume_auth_token(session: Session, raw_token: str, purpose: AuthTokenPurpo
     return token
 
 
+def registration_allowed(invite_code: str | None) -> bool:
+    if settings.registration_open:
+        return True
+    expected = settings.registration_invite_code
+    # Closed with no code configured means nobody can sign up; compare in constant time.
+    return bool(expected and invite_code and hmac.compare_digest(invite_code.encode(), expected.encode()))
+
+
 @app.post("/api/auth/register", response_model=UserRead, status_code=status.HTTP_201_CREATED)
 def register(payload: RegisterRequest, session: Session = Depends(db_session)) -> User:
+    if not registration_allowed(payload.invite_code):
+        raise HTTPException(status_code=403, detail="Sign-up is by invitation only")
     existing = session.scalar(select(User).where(User.email == payload.email.lower()))
     if existing is not None:
         raise HTTPException(status_code=409, detail="Email is already registered")

@@ -183,3 +183,27 @@ def test_one_time_tokens_are_not_echoed_outside_local(monkeypatch) -> None:
     assert "devToken" not in reset
     assert "devToken" not in magic
     assert len(auth_tokens(session)) == 2
+
+
+@pytest.mark.parametrize(
+    ("open_", "code", "given", "allowed"),
+    [
+        (True, None, None, True),
+        (False, "beta-2026", "beta-2026", True),
+        (False, "beta-2026", "wrong", False),
+        (False, "beta-2026", None, False),
+        (False, None, "anything", False),  # closed with no code configured: nobody signs up
+    ],
+)
+def test_registration_switch(monkeypatch, open_: bool, code: str | None, given: str | None, allowed: bool) -> None:
+    monkeypatch.setattr(api_main.settings, "registration_open", open_)
+    monkeypatch.setattr(api_main.settings, "registration_invite_code", code)
+    session = FakeAuthSession()
+    payload = RegisterRequest(email="new@example.com", password="password-123", invite_code=given)
+    if allowed:
+        assert register(payload, session).email == "new@example.com"  # type: ignore[arg-type]
+    else:
+        with pytest.raises(HTTPException) as exc:
+            register(payload, session)  # type: ignore[arg-type]
+        assert exc.value.status_code == 403
+        assert session.added == []

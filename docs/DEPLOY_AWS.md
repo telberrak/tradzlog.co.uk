@@ -116,10 +116,14 @@ Each deploy writes them to `/srv/tradzlog/.env`; never edit that file on the ser
 | `TRADZLOG_BASIC_AUTH_USER` | yes\*    | the private-beta username                                                |
 | `TRADZLOG_BASIC_AUTH_HASH` | yes\*    | bcrypt hash of its password (below)                                      |
 | `TRADZLOG_PUBLIC`          | no       | `true` only once the web app has its own sign-in; replaces the two above |
+| `REGISTRATION_INVITE_CODE` | yes\*\* | code needed to sign up while sign-up is closed (any long random string)  |
+| `REGISTRATION_OPEN`        | no       | `true` opens sign-up to everyone (M1); closed by default in production   |
 | `BACKUP_S3_BUCKET`         | no       | Mizan's backup bucket; backups go under `tradzlog/`                      |
 | `ANTHROPIC_API_KEY`        | no       | AI coaching                                                              |
 | `SENTRY_DSN`               | no       | error tracking                                                           |
 | `S3_PREFIX`                | no       | key prefix inside the bucket                                             |
+
+\* Until the web app has its own sign-in. \*\* While `REGISTRATION_OPEN` is not `true`; without it nobody can sign up.
 
 Generate the secrets on your PC (Git Bash has `openssl`):
 
@@ -175,11 +179,11 @@ the previous version runs on the newer schema, so keep migrations backwards comp
 
 ## 7. First sign-up
 
-The database starts empty. Register your user through the API (not gated), then open the site
-with the basic-auth username and password:
+The database starts empty and sign-up is invite-only. Register your user through the API (not
+gated) with `REGISTRATION_INVITE_CODE`, then open the site with the basic-auth username and password:
 
 ```bash
-curl -sS https://tradzlog.co.uk/api/auth/register -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"a-strong-password","name":"Your Name"}'
+curl -sS https://tradzlog.co.uk/api/auth/register -H "Content-Type: application/json" -d '{"email":"you@example.com","password":"a-strong-password","name":"Your Name","invite_code":"YOUR-INVITE-CODE"}'
 ```
 
 Create your trading accounts as described in the README (API docs are not exposed publicly;

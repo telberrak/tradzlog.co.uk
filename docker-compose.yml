@@ -9,7 +9,7 @@ services:
       JWT_SECRET: local-docker-change-me-before-production-please
       JWT_ISSUER: tradzlog.local
       ACCESS_TOKEN_EXPIRE_MINUTES: "43200"
-      ANTHROPIC_MODEL: claude-sonnet-4-20250514
+      ANTHROPIC_MODEL: claude-sonnet-5-5
       LOG_LEVEL: INFO
     profiles: ["build-only"]
     command: ["python", "-c", "print('tradzlog image built')"]

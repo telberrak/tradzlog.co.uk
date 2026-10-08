@@ -9,7 +9,7 @@ TradzLog is a Python-first professional trading journal and analytics platform.
 - API: FastAPI, Pydantic v2, SQLAlchemy 2, Alembic
 - Database: PostgreSQL
 - Cache/jobs: Redis and RQ-ready queues
-- AI: Anthropic Claude (`claude-sonnet-4-20250514`)
+- AI: Anthropic Claude (`claude-sonnet-5-5`)
 - Web shell: Python ASGI app with a dark trading-terminal UI foundation
 
 ## Local Setup

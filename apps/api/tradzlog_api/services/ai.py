@@ -26,6 +26,22 @@ def build_coaching_payload(summary: dict[str, object], setup_breakdown: list[dic
     )
 
 
+# Models that accept server-side refusal fallbacks ("default" routes by refusal category).
+FALLBACK_MODELS = {"claude-sonnet-5-5", "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1"}
+
+
+def coaching_text(message: object) -> str:
+    stop_reason = getattr(message, "stop_reason", None)
+    if stop_reason == "refusal":
+        details = getattr(message, "stop_details", None)
+        category = getattr(details, "category", None) or "unspecified"
+        return f"Coaching could not be generated for this data (declined: {category}). Try again later."
+    text = "\n".join(block.text for block in message.content if block.type == "text")
+    if stop_reason == "max_tokens":
+        text += "\n\n(Analysis was cut short.)"
+    return text
+
+
 def generate_coaching_insight(
     user_id: str,
     user_name: str,
@@ -34,13 +50,20 @@ def generate_coaching_insight(
 ) -> AIInsight:
     if settings.anthropic_api_key:
         client = Anthropic(api_key=settings.anthropic_api_key)
-        message = client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=1800,
-            system=SYSTEM_PROMPT.format(user_name=user_name),
-            messages=[{"role": "user", "content": payload}],
-        )
-        content = "\n".join(block.text for block in message.content if block.type == "text")
+        request = {
+            "model": settings.anthropic_model,
+            # Thinking is on by default on current models and counts toward max_tokens.
+            "max_tokens": 16000,
+            "system": SYSTEM_PROMPT.format(user_name=user_name),
+            "messages": [{"role": "user", "content": payload}],
+        }
+        if settings.anthropic_model in FALLBACK_MODELS:
+            message = client.beta.messages.create(
+                **request, betas=["server-side-fallback-2026-07-01"], fallbacks="default"
+            )
+        else:
+            message = client.messages.create(**request)
+        content = coaching_text(message)
     else:
         content = (
             "AI coaching is wired but ANTHROPIC_API_KEY is not configured. "

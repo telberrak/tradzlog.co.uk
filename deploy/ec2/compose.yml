@@ -25,6 +25,9 @@ x-app: &app
     S3_PREFIX: ${S3_PREFIX:-}
     AWS_REGION: ${AWS_REGION:-eu-west-2}
     AWS_DEFAULT_REGION: ${AWS_REGION:-eu-west-2}
+    # Private beta: sign-up needs the invite code until REGISTRATION_OPEN=true (M1).
+    REGISTRATION_OPEN: ${REGISTRATION_OPEN:-false}
+    REGISTRATION_INVITE_CODE: ${REGISTRATION_INVITE_CODE:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
     RESEND_API_KEY: ${RESEND_API_KEY:-}

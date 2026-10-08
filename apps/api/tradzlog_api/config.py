@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     jwt_issuer: str = "tradzlog.local"
     access_token_expire_minutes: int = 43200
     anthropic_api_key: str | None = None
-    anthropic_model: str = "claude-sonnet-4-20250514"
+    anthropic_model: str = "claude-sonnet-5-5"
     sentry_dsn: str | None = None
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:3000", "http://localhost:8000", "http://localhost:8001"]
@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     s3_prefix: str = ""
     s3_endpoint_url: str | None = None  # only for S3-compatible servers (MinIO in tests); unset on AWS
     s3_url_ttl_seconds: int = 3600
+    # When closed, sign-up needs REGISTRATION_INVITE_CODE (private beta). Production defaults to closed.
+    registration_open: bool = True
+    registration_invite_code: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
