@@ -147,13 +147,14 @@ downgrades them at period end, and every limit is covered by a test.
 
 The feature that decides whether traders stay: nobody types in 200 trades.
 
-**Status:** step 1 done (8 October 2026): upload -> preview (nothing written) -> confirm -> summary;
-IBKR Flex, MT5 (CSV and HTML report), NinjaTrader, Tradovate and generic CSV with auto-detection
-and a file-timezone choice; FIFO round trips (scale in/out, flips, continuing open trades);
-per-account fingerprints so re-imports add nothing; new-instrument point values confirmed in the
-preview; broker vs TradzLog P&L check; undo (newest first). Still to do: validate with your real
-IBKR and MT5 exports, the column mapper for unknown formats, and background processing for very
-large files.
+**Status:** done for launch (8 October 2026). Upload -> preview (nothing written) -> confirm ->
+summary, with undo. Validated against real exports: Interactive Brokers (options), tastytrade
+(348 fills; 121 of 122 positions equal to tastytrade's cash to the cent, the last within its
+rounding) and NinjaTrader Position History (2,322 pairs; every contract equal to NinjaTrader's P/L).
+Also: date-order detection, per-account de-duplication, importer-version guard, optional commission
+per contract for files without fees. MetaTrader 5 and Tradovate are tested with samples only.
+Later (not needed for launch): column mapper for other brokers, background processing for very
+large files, per-symbol commissions.
 
 **Tasks**
 
