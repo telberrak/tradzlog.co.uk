@@ -31,6 +31,12 @@ class Settings(BaseSettings):
     feature_billing: bool = False
     # Shown on the legal and error pages; must be a mailbox someone reads.
     support_email: str = "tarik.elberrak@datakratos.com"
+    # Transactional email (tradzlog_api.services.email): "log" sends nothing, "ses" uses Amazon SES.
+    email_backend: str = "log"
+    email_from: str = "TradzLog <no-reply@tradzlog.com>"
+    ses_region: str = "eu-west-2"
+    # Where links in emails point.
+    public_url: str = "http://localhost:8001"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

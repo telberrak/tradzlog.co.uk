@@ -39,7 +39,7 @@ Required:
 Optional integrations:
 
 - `ANTHROPIC_API_KEY`
-- `RESEND_API_KEY`
+- `EMAIL_BACKEND` (`log` or `ses`), `EMAIL_FROM`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
 - Cloudflare R2 credentials

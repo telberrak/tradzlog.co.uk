@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -31,10 +33,9 @@ from tradzlog_api.services.observability import (
     init_observability,
     start_request,
 )
-from tradzlog_api.services.reports import performance_report_payload, tax_report_csv
 from tradzlog_db.models import (
     Account,
-    AccountSnapshot,
+    AccountType,
     AIInsight,
     Attachment,
     BillingInvoice,
@@ -93,6 +94,7 @@ from tradzlog_web.public_routes import router as public_router
 from tradzlog_web.settings_routes import router as settings_router
 from tradzlog_web.transaction_routes import router as transaction_router
 from tradzlog_web.ui import (
+    RISK_NOTICE,
     coach_quality_badge,
     empty_state,
     filter_tabs,
@@ -182,6 +184,8 @@ WEB_SENSITIVE_POSTS = {
     "/settings/uploads",
     "/login",
     "/signup",
+    "/forgot-password",
+    "/reset-password",
     "/settings/security/password",
     "/settings/data/export",
     "/settings/data/delete",
@@ -1611,120 +1615,139 @@ async def upload_attachment(
         session.close()
 
 
-def report_nav(active: str) -> str:
-    items = [
-        ("Reports Hub", "/reports", "hub"),
-        ("Performance", "/reports/performance", "performance"),
-        ("Tax CSV", "/reports/tax-csv", "tax"),
-        ("Prop Firm", "/reports/prop-firm", "prop"),
-    ]
-    return '<div class="actions" style="margin-top:16px">' + "".join(
-        f'<a class="pill {"primary" if key == active else ""}" href="{href}">{label}</a>'
-        for label, href, key in items
-    ) + "</div>"
+REPORT_TABS = (("Performance", "/reports/performance", "performance"), ("Prop firm", "/reports/prop-firm", "prop"), ("Tax export", "/reports/tax", "tax"))
 
 
-def closed_trade_rows(trades: list[Trade]) -> str:
-    return "".join(
-        f"""<tr>
-          <td>{escape(trade.instrument.symbol)}</td>
-          <td>{escape(localtime.fmt(trade.opened_at, "%Y-%m-%d"))}</td>
-          <td>{escape(localtime.fmt(trade.closed_at, "%Y-%m-%d"))}</td>
-          <td>{number(trade.metrics.total_quantity if trade.metrics else 0)}</td>
-          <td>{money(trade.metrics.average_entry if trade.metrics else 0)}</td>
-          <td>{money(trade.metrics.average_exit if trade.metrics else 0)}</td>
-          <td class="{tone(trade.metrics.realized_pnl if trade.metrics else 0)}">{money(trade.metrics.realized_pnl if trade.metrics else 0)}</td>
-          <td>{number(trade.metrics.r_multiple if trade.metrics else 0, "R")}</td>
-        </tr>"""
-        for trade in trades
-    ) or '<tr><td colspan="8" class="muted">No closed trades available.</td></tr>'
+def report_nav(active: str, qs: str = "") -> str:
+    return f'<div class="page-block no-print">{filter_tabs([(label, href + qs, key == active) for label, href, key in REPORT_TABS])}</div>'
 
 
-@app.get("/reports", response_class=HTMLResponse)
-def reports_hub() -> str:
+def uk_tax_years(today: date, count: int = 4) -> list[tuple[str, str]]:
+    """(label, range code) for the latest UK tax years, 6 April to 5 April."""
+    first = today.year if today >= date(today.year, 4, 6) else today.year - 1
+    years = []
+    for year in range(first, first - count, -1):
+        code = book.custom_code(date(year, 4, 6), date(year + 1, 4, 5))
+        years.append((f"{year}/{str(year + 1)[-2:]}", code))
+    return years
+
+
+@app.get("/reports")
+def reports_hub() -> RedirectResponse:
+    return RedirectResponse("/reports/performance", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@app.get("/reports/performance", response_class=HTMLResponse)
+def performance_report(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Reports", "reports", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
-        metrics = summary(session, user.id)
-        report_payload = performance_report_payload(session, user.id)
+        today = today_utc()
+        period = book.resolve_period(range_code, today)
+        accounts, selected, trades = load_book(session, user, account_id)
+        current = closed_in(trades, period)
+        result = book.stats(current)
+        scope_accounts = [selected] if selected else accounts
+        flows = load_cash_flows(session, scope_accounts)
+        opening = opening_balance(scope_accounts, trades, period, flows)
+        curve = book.equity_curve(opening, current, cash_flows_in(flows, period))
+        closing = curve[-1].balance if curve else opening
+        account_param = selected.id if selected else None
+        qs = query_string({"account_id": account_param, "range": period.code})
+        ranked = sorted(current, key=book.pnl, reverse=True)
+        best = [trade for trade in ranked[:5] if book.pnl(trade) > 0]
+        worst = [trade for trade in reversed(ranked[-5:]) if book.pnl(trade) < 0]
+        span = f"{period.start:%d %b %Y} – {period.end:%d %b %Y}" if period.start else f"All time to {period.end:%d %b %Y}"
         body = f"""
-          {report_nav("hub")}
-          <section class="grid kpis">
-            {kpi_card("Closed Trades", str(metrics["trades_count"]), "neutral", "Reportable trades")}
-            {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "Tax period")}
-            {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Performance")}
-            {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "Performance")}
+          {report_nav("performance", qs)}
+          <div class="no-print">{filter_bar("/reports/performance", accounts, account_param, period)}</div>
+          <section class="card report-head">
+            <div class="card-title"><div><h2>Performance report</h2><span class="meta">{escape(selected.name if selected else "All accounts")} · {span} ·
+              generated {localtime.fmt(datetime.now(UTC), "%d %b %Y %H:%M")}</span></div>
+              <button class="btn btn-sm no-print" type="button" onclick="window.print()">Print or save as PDF</button></div>
+            <div class="kpi-row" style="margin:0">
+              {kpi("Net P&L", money(result.net_pnl, signed=True), tone(result.net_pnl), f"{result.trades} closed trades")}
+              {kpi("Win rate", number(result.win_rate, "%"), "", f"{result.wins} wins · {result.losses} losses")}
+              {kpi("Profit factor", number(result.profit_factor) if result.profit_factor is not None else "—")}
+              {kpi("Expectancy", number(result.expectancy_r, "R") if result.expectancy_r is not None else "—", tone(result.expectancy_r))}
+              {kpi("Balance", money(closing), "", f"from {money(opening)}")}
+              {kpi("Max drawdown", number(book.max_drawdown_pct(curve), "%"), "negative" if book.max_drawdown_pct(curve) < 0 else "")}
+            </div>
           </section>
-          <section class="grid accounts">
-            <article class="card"><div class="label">Performance Report</div><h2>Printable summary</h2><p class="muted">Includes account summary, setup breakdown, top wins, and top losses.</p><a class="pill primary" href="/reports/performance">Open Report</a></article>
-            <article class="card"><div class="label">Tax CSV</div><h2>Closed trades export</h2><p class="muted">Compatible CSV fields for accounting workflows.</p><a class="pill primary" href="/reports/tax-csv">Download CSV</a></article>
-            <article class="card"><div class="label">Prop Firm</div><h2>Drawdown and limits</h2><p class="muted">Shows prop account limits, daily loss, total drawdown, and targets.</p><a class="pill primary" href="/reports/prop-firm">Open Report</a></article>
+          <section class="card" style="margin-top:14px"><div class="card-title"><h2>Equity</h2></div>{equity_chart(curve, opening)}</section>
+          {performance_table(group_rows(book.by_expectancy(book.group_by(current, by_setup))), "Setup")}
+          {performance_table(group_rows(book.by_expectancy(book.group_by(current, by_symbol))), "Instrument")}
+          <section class="grid two-col" style="margin-top:14px">
+            <div class="card"><div class="card-title"><h2>Best trades</h2></div>{trade_table(best, today, show_account=selected is None, empty='<p class="muted">No winning trades in this range.</p>')}</div>
+            <div class="card"><div class="card-title"><h2>Worst trades</h2></div>{trade_table(worst, today, show_account=selected is None, empty='<p class="muted">No losing trades in this range.</p>')}</div>
           </section>
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Generation Status</div><h2 style="margin:4px 0 0">Reports Ready</h2></div><span class="badge">{escape(str(report_payload["status"]))}</span></div>
-            <p class="muted">PDF rendering can be added on top of these report views; the data contracts are already present.</p>
-          </section>
+          <p class="hint">{escape(RISK_NOTICE)}</p>
         """
-        return shell("Reports", "reports", body, "Reports", user.name or user.email)
+        return shell("Reports", "reports", body, selected.name if selected else "All accounts", user.name or user.email)
     finally:
         session.close()
 
 
-@app.get("/reports/performance", response_class=HTMLResponse)
-def performance_report() -> str:
+@app.get("/reports/tax", response_class=HTMLResponse)
+def tax_report_page(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Performance Report", "reports", '<section class="empty" style="margin-top:18px">No users found.</section>')
-        metrics = summary(session, user.id)
-        setup_rows = grouped_performance(session, user.id, "setup")[:10]
-        trades = session.scalars(
-            select(Trade)
-            .options(selectinload(Trade.metrics), selectinload(Trade.instrument))
-            .join(TradeMetrics, TradeMetrics.trade_id == Trade.id)
-            .where(Trade.user_id == user.id, Trade.status == TradeStatus.CLOSED)
-            .order_by(TradeMetrics.realized_pnl.desc())
-        ).all()
-        top_wins = trades[:5]
-        top_losses = list(reversed(trades[-5:]))
-        generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        today = today_utc()
+        years = uk_tax_years(today)
+        period = book.resolve_period(range_code or years[1][1], today)
+        accounts, selected, trades = load_book(session, user, account_id)
+        current = closed_in(trades, period)
+        result = book.stats(current)
+        fees = sum((trade.commissions or Decimal("0") for trade in current), Decimal("0"))
+        account_param = selected.id if selected else None
+        year_tabs = filter_tabs([(f"Tax year {label}", "/reports/tax" + query_string({"account_id": account_param, "range": code}), code == period.code)
+                                 for label, code in years])
+        download = "/reports/tax-csv" + query_string({"account_id": account_param, "range": period.code})
         body = f"""
-          {report_nav("performance")}
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Performance Report</div><h2 style="margin:4px 0 0">All Accounts</h2></div><span class="badge">Generated {escape(generated)}</span></div>
-            <section class="grid kpis">
-              {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "Closed trades")}
-              {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
-              {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "All setups")}
-              {kpi_card("Avg R", number(metrics["average_r"], "R"), tone(metrics["average_r"]), "Risk normalized")}
-            </section>
+          {report_nav("tax")}
+          <div class="filter-bar">{account_picker("/reports/tax", accounts, account_param, {"range": period.code})}{year_tabs}</div>
+          <section class="kpi-row">
+            {kpi("Closed trades", str(result.trades))}
+            {kpi("Net P&L", money(result.net_pnl, signed=True), tone(result.net_pnl), "After fees")}
+            {kpi("Fees and commissions", money(fees))}
           </section>
-          {performance_table(setup_rows, "Setup Breakdown")}
-          <section class="grid two-col">
-            <div class="card"><div class="section-head"><div><div class="label">Top Wins</div><h2 style="margin:4px 0 0">Best Trades</h2></div></div><table><thead><tr><th>Symbol</th><th>Open</th><th>Close</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Net</th><th>R</th></tr></thead><tbody>{closed_trade_rows(top_wins)}</tbody></table></div>
-            <div class="card"><div class="section-head"><div><div class="label">Top Losses</div><h2 style="margin:4px 0 0">Worst Trades</h2></div></div><table><thead><tr><th>Symbol</th><th>Open</th><th>Close</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Net</th><th>R</th></tr></thead><tbody>{closed_trade_rows(top_losses)}</tbody></table></div>
+          <section class="card">
+            <div class="card-title"><h2>Closed trades, {f"{period.start:%d %b %Y} – " if period.start else "up to "}{period.end:%d %b %Y}</h2>
+              <a class="btn btn-primary btn-sm" href="{escape(download)}">Download CSV</a></div>
+            <p class="muted" style="margin:0">One row per closed trade: account, symbol, side, dates, quantity, average entry and exit,
+              gross P&amp;L, fees and net P&amp;L, in each account's currency. UK tax years run from 6 April to 5 April.
+              This export is a record of your trades, not tax advice; check it with your accountant.</p>
           </section>
         """
-        return shell("Performance Report", "reports", body, "Reports", user.name or user.email)
+        return shell("Reports", "reports", body, selected.name if selected else "All accounts", user.name or user.email)
     finally:
         session.close()
 
 
 @app.get("/reports/tax-csv")
-def tax_csv_download() -> Response:
+def tax_csv_download(account_id: str | None = Query(default=None), range_code: str | None = Query(default=None, alias="range")) -> Response:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            raise HTTPException(status_code=400, detail="No demo user available")
-        return Response(
-            content=tax_report_csv(session, user.id),
-            media_type="text/csv",
-            headers={"Content-Disposition": 'attachment; filename="tradzlog-tax-report.csv"'},
-        )
+        period = book.resolve_period(range_code or "ALL", today_utc())
+        _, _, trades = load_book(session, user, account_id)
+        current = sorted(closed_in(trades, period), key=lambda trade: trade.closed_at)
+        out = io.StringIO()
+        writer = csv.writer(out)
+        writer.writerow(["account", "currency", "symbol", "side", "open_date", "close_date", "quantity", "avg_entry", "avg_exit",
+                         "gross_pnl", "fees", "net_pnl"])
+        for trade in current:
+            metrics = trade.metrics
+            net = book.pnl(trade)
+            fees = trade.commissions or Decimal("0")
+            writer.writerow([trade.account.name, trade.account.currency, trade.instrument.symbol, trade.direction.value,
+                             localtime.fmt(trade.opened_at, "%Y-%m-%d"), localtime.fmt(trade.closed_at, "%Y-%m-%d"),
+                             plain_number(metrics.total_quantity if metrics else None), plain_number(metrics.average_entry if metrics else None),
+                             plain_number(metrics.average_exit if metrics else None), plain_number(net + fees), plain_number(fees), plain_number(net)])
+        name = f"tradzlog-trades-{period.code.replace('..', '_to_') if period.custom else period.code.lower()}.csv"
+        return Response(content=out.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
     finally:
         session.close()
 
@@ -1734,40 +1757,21 @@ def prop_firm_report() -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Prop Firm Report", "reports", '<section class="empty" style="margin-top:18px">No users found.</section>')
-        accounts = session.scalars(
-            select(Account).where(Account.user_id == user.id, Account.prop_firm_name.is_not(None), Account.archived_at.is_(None))
-        ).all()
-        cards = ""
-        for account in accounts:
-            metrics = summary(session, user.id, account.id)
-            snapshots = session.scalars(
-                select(AccountSnapshot).where(AccountSnapshot.account_id == account.id).order_by(AccountSnapshot.date.asc())
-            ).all()
-            max_drawdown = min((row.drawdown_from_peak for row in snapshots), default=Decimal("0"))
-            daily_loss_utilisation = Decimal("0")
-            if account.max_daily_loss and metrics["net_pnl"] < 0:
-                daily_loss_utilisation = min(abs(Decimal(metrics["net_pnl"])) / account.max_daily_loss * Decimal("100"), Decimal("100"))
-            total_loss_utilisation = Decimal("0")
-            if account.max_total_loss and max_drawdown < 0:
-                total_loss_utilisation = min(abs(max_drawdown) / account.max_total_loss * Decimal("100"), Decimal("100"))
-            cards += f"""
-              <article class="card">
-                <div class="section-head"><div><div class="label">{escape(account.prop_firm_name or "Prop Firm")}</div><h2 style="margin:4px 0 0">{escape(account.name)}</h2></div><span class="badge">{escape(account.currency)}</span></div>
-                <section class="grid" style="grid-template-columns:repeat(3,1fr);gap:12px">
-                  <div><div class="label">Net P&L</div><div class="kpi {tone(metrics["net_pnl"])}">{money(metrics["net_pnl"])}</div></div>
-                  <div><div class="label">Daily Limit</div><div class="kpi">{money(account.max_daily_loss)}</div></div>
-                  <div><div class="label">Total Limit</div><div class="kpi">{money(account.max_total_loss)}</div></div>
-                </section>
-                <div style="margin-top:14px"><div class="section-head" style="margin-bottom:6px"><span class="label">Daily Loss Utilisation</span><span class="small muted">{number(daily_loss_utilisation, "%")}</span></div><div class="bar"><span style="width:{daily_loss_utilisation}%;background:var(--amber)"></span></div></div>
-                <div style="margin-top:14px"><div class="section-head" style="margin-bottom:6px"><span class="label">Total Drawdown Utilisation</span><span class="small muted">{number(total_loss_utilisation, "%")}</span></div><div class="bar"><span style="width:{total_loss_utilisation}%;background:var(--red)"></span></div></div>
-              </article>
-            """
+        accounts, _, trades = load_book(session, user, None)
+        prop = [account for account in accounts if account.account_type == AccountType.PROP_FIRM or account.max_daily_loss or account.max_total_loss]
+        today = today_utc()
+        flows = load_cash_flows(session, prop)
+        cards = "".join(
+            account_card(account, [trade for trade in trades if trade.account_id == account.id],
+                         [flow for flow in flows if flow.account_id == account.id], today)
+            for account in prop
+        )
         if not cards:
-            cards = '<section class="empty">No prop firm accounts found. Add prop firm metadata to an account to activate this report.</section>'
-        body = f"{report_nav('prop')}<section class=\"grid accounts\">{cards}</section>"
-        return shell("Prop Firm Report", "reports", body, "Reports", user.name or user.email)
+            cards = empty_state("No prop-firm accounts", "Set a daily or maximum loss limit on a trading account to track it here.",
+                                "/settings/accounts", "Edit trading accounts")
+        else:
+            cards = f'<section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px">{cards}</section>'
+        return shell("Reports", "reports", report_nav("prop") + cards, "Prop firm", user.name or user.email)
     finally:
         session.close()
 

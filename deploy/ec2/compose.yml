@@ -34,7 +34,11 @@ x-app: &app
     REGISTRATION_INVITE_CODE: ${REGISTRATION_INVITE_CODE:-}
     ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5-5}
-    RESEND_API_KEY: ${RESEND_API_KEY:-}
+    # Email: stays "log" (nothing sent) until the domain is verified in SES; then set EMAIL_BACKEND=ses.
+    EMAIL_BACKEND: ${EMAIL_BACKEND:-log}
+    EMAIL_FROM: ${EMAIL_FROM:-TradzLog <no-reply@${TRADZLOG_DOMAIN}>}
+    SES_REGION: ${AWS_REGION:-eu-west-2}
+    PUBLIC_URL: https://${TRADZLOG_DOMAIN}
     SENTRY_DSN: ${SENTRY_DSN:-}
     LOG_LEVEL: ${LOG_LEVEL:-INFO}
   depends_on:

@@ -213,7 +213,9 @@ Copy `.env.example` to `.env` and adjust values. Variables are loaded by Pydanti
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | No | Token lifetime (default: 43200) |
 | `ANTHROPIC_API_KEY` | No | Enables AI coaching when set |
 | `ANTHROPIC_MODEL` | No | Claude model (default: `claude-sonnet-5-5`) |
-| `RESEND_API_KEY` | No | Email delivery (magic link, etc.) |
+| `EMAIL_BACKEND` | No | `log` (default, sends nothing) or `ses` (Amazon SES) |
+| `EMAIL_FROM` | No | Sender, e.g. `TradzLog <no-reply@tradzlog.com>` |
+| `PUBLIC_URL` | No | Site address used in email links |
 | `GOOGLE_CLIENT_ID` | No | OAuth (planned integration) |
 | `GOOGLE_CLIENT_SECRET` | No | OAuth (planned integration) |
 | `STORAGE_BACKEND` | No | `local` (default, `var/uploads`) or `s3` for screenshots |

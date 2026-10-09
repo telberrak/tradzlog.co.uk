@@ -17,6 +17,7 @@ from starlette.concurrency import run_in_threadpool
 
 from tradzlog_api.config import settings
 from tradzlog_api.security import verify_password
+from tradzlog_api.services import email as mail
 from tradzlog_api.services import storage
 from tradzlog_api.services.account_data import delete_account, write_export
 from tradzlog_db.session import SessionLocal
@@ -108,12 +109,13 @@ def remove_account(request: Request, password: str, confirm: str) -> RedirectRes
             return data_redirect(f"Type {CONFIRM_WORD} to confirm.")
         if user.hashed_password and not verify_password(password, user.hashed_password):
             return data_redirect("Your password is incorrect.")
-        user_id = user.id
+        user_id, address, name = user.id, user.email, user.name
         result = delete_account(db, user, storage.get_storage())
         logger.info("deleted user %s: %s", user_id, result)
         response = RedirectResponse("/account-deleted", status_code=status.HTTP_303_SEE_OTHER)
         end_session(db, request, response)
         db.commit()
+        mail.send(mail.account_deleted(address, name))
         return response
     finally:
         db.close()

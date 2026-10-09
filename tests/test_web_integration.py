@@ -694,6 +694,9 @@ def test_export_then_delete_account(client) -> None:
                           follow_redirects=False)
     assert deleted.headers["location"] == "/account-deleted"
     assert "Your account has been deleted" in client.get("/account-deleted").text
+    from tradzlog_api.services import email as mail
+
+    assert "Your TradzLog account has been deleted" in [message.subject for message in mail.OUTBOX if message.to == email]
     assert client.get("/dashboard", follow_redirects=False).status_code == 303  # signed out
     assert not screenshot.exists()
 
@@ -899,3 +902,103 @@ def test_position_risk_uses_the_contract_point_value(client) -> None:
         db.close()
     page = client.get("/positions").text
     assert "$1,000.00" in page  # (100 - 98) x 10 x 50
+
+
+def test_reports_performance_tax_and_prop_firm(client) -> None:
+    from tradzlog_db.models import Account, Trade, TradeMetrics, TradeStatus
+
+    email = sign_up(client, "Reporter")
+    ids = seed_private_book(email, f"rep{uuid4().hex[:6]}")
+    db = SessionLocal()
+    try:
+        trade = db.get(Trade, ids["trade_id"])
+        trade.status = TradeStatus.CLOSED
+        trade.closed_at = datetime(2025, 6, 2, 15, tzinfo=UTC)
+        trade.commissions = Decimal("2")
+        db.get(TradeMetrics, trade.id).realized_pnl = Decimal("123.45")
+        db.get(Account, ids["account_id"]).max_daily_loss = Decimal("500")
+        db.commit()
+    finally:
+        db.close()
+
+    assert client.get("/reports", follow_redirects=False).headers["location"] == "/reports/performance"
+    report = client.get("/reports/performance?range=2025-04-06..2026-04-05").text
+    assert "Performance report" in report and "+$123.45" in report and "06 Apr 2025 – 05 Apr 2026" in report
+    assert "+$123.45" not in client.get("/reports/performance?range=2026-04-06..2027-04-05").text
+
+    tax = client.get("/reports/tax?range=2025-04-06..2026-04-05").text
+    assert "Tax year 2025/26" in tax and "+$123.45" in tax
+    csv_response = client.get("/reports/tax-csv?range=2025-04-06..2026-04-05")
+    assert csv_response.headers["content-type"].startswith("text/csv")
+    lines = csv_response.text.strip().splitlines()
+    assert lines[0].startswith("account,currency,symbol,side") and len(lines) == 2
+    assert lines[1].endswith(",2025-06-02,10,100,,125.45,2,123.45")
+    assert "up to" in client.get("/reports/tax?range=ALL").text
+
+    prop = client.get("/reports/prop-firm").text
+    assert "Daily loss limit used today" in prop
+
+
+# --------------------------------------------------------------------- email and password reset
+
+
+def test_password_reset_by_email(client) -> None:
+    from tradzlog_api.services import email
+
+    email.OUTBOX.clear()
+    address = sign_up(client, "Forgetful")
+    assert [message.subject for message in email.OUTBOX if message.to == address] == ["Welcome to TradzLog"]
+    with new_client() as laptop:
+        laptop.post("/login", data={"email": address, "password": "correct-horse-1", "next": "/dashboard"}, headers=ORIGIN)
+        assert laptop.get("/dashboard", follow_redirects=False).status_code == 200
+
+        with new_client() as visitor:
+            assert "Forgot your password?" in visitor.get("/login").text
+            unknown = visitor.post("/forgot-password", data={"email": "nobody@example.com"}, headers=ORIGIN)
+            known = visitor.post("/forgot-password", data={"email": address.upper()}, headers=ORIGIN)
+            assert "we've emailed it a link" in unknown.text and "we've emailed it a link" in known.text
+            assert visitor.post("/forgot-password", data={"email": address}).status_code == 403  # must come from this site
+            resets = [message for message in email.OUTBOX if message.subject == "Reset your TradzLog password"]
+            assert [message.to for message in resets] == [address]
+            link = re.search(r"https?://\S+/reset-password\?token=(\S+)", resets[0].text)
+            token = link.group(1)
+
+            assert "Choose a new password" in visitor.get(f"/reset-password?token={token}").text
+            assert visitor.get("/reset-password?token=forged").status_code == 400
+            short = visitor.post("/reset-password", data={"token": token, "new": "short", "new2": "short"}, headers=ORIGIN)
+            assert short.status_code == 400 and "at least" in short.text
+            done = visitor.post("/reset-password", data={"token": token, "new": "brand-new-pass-9", "new2": "brand-new-pass-9"},
+                                headers=ORIGIN, follow_redirects=False)
+            assert done.headers["location"] == "/login?reset=1"
+            assert "Password changed. Sign in" in visitor.get("/login?reset=1").text
+            again = visitor.post("/reset-password", data={"token": token, "new": "another-pass-99", "new2": "another-pass-99"}, headers=ORIGIN)
+            assert again.status_code == 400 and "expired or was already used" in again.text
+
+        assert laptop.get("/dashboard", follow_redirects=False).status_code == 303  # every device signed out
+    old = client.post("/login", data={"email": address, "password": "correct-horse-1", "next": "/"}, headers=ORIGIN, follow_redirects=False)
+    assert old.status_code == 400
+    new = client.post("/login", data={"email": address, "password": "brand-new-pass-9", "next": "/"}, headers=ORIGIN, follow_redirects=False)
+    assert new.status_code == 303
+    assert "Your TradzLog password was changed" in [message.subject for message in email.OUTBOX if message.to == address]
+
+
+def test_reset_links_expire_and_only_the_newest_works(client) -> None:
+    from tradzlog_api.services import email
+    from tradzlog_db.models import AuthToken, User
+
+    address = sign_up(client, "Expiry")
+    email.OUTBOX.clear()
+    for _ in range(2):
+        client.post("/forgot-password", data={"email": address}, headers=ORIGIN)
+    first, second = (re.search(r"token=(\S+)", message.text).group(1) for message in email.OUTBOX)
+    assert client.get(f"/reset-password?token={first}").status_code == 400
+    assert client.get(f"/reset-password?token={second}").status_code == 200
+    db = SessionLocal()
+    try:
+        user_id = db.scalar(select(User.id).where(User.email == address))
+        for token in db.scalars(select(AuthToken).where(AuthToken.user_id == user_id)).all():
+            token.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        db.commit()
+    finally:
+        db.close()
+    assert client.get(f"/reset-password?token={second}").status_code == 400

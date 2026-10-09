@@ -367,6 +367,7 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .lessons{margin:0;padding-left:18px;font-size:13px;line-height:1.6}
 .journal-detail-main{grid-column:span 2}
 @media (max-width:720px){.journal-detail-main{grid-column:auto}}
+@media print{.sidebar,.topbar,.no-print,.coach-disclaimer{display:none!important}.main-area{margin:0!important}.card{break-inside:avoid;box-shadow:none}}
 /* first-run guide on the dashboard */
 .onboarding{margin-bottom:14px}
 .onboarding-progress{height:6px;border-radius:999px;background:var(--bg-surface-alt);overflow:hidden;margin:0 0 16px}
@@ -477,6 +478,7 @@ NAV_ICONS: dict[str, str] = {
     "trades": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>',
     "positions": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>',
     "transactions": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 4v16M3 8l4-4 4 4M17 20V4M13 16l4 4 4-4"/></svg>',
+    "reports": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h5"/></svg>',
     "journal": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5h16v14H4z"/><path d="M8 5v14M8 9h4"/></svg>',
     "analytics": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5M10 19V9M16 19v-6M22 19V3"/></svg>',
     "coaching": '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a7 7 0 0 1 7 7c0 3-2 5-4 6l-1 5H10l-1-5c-2-1-4-3-4-6a7 7 0 0 1 7-7z"/></svg>',
@@ -494,6 +496,7 @@ def sidebar_nav(active: str) -> str:
         ("Transactions", "/transactions", "transactions"),
         ("Journal", "/journal", "journal"),
         ("Analytics", "/analytics", "analytics"),
+        ("Reports", "/reports/performance", "reports"),
         ("AI Coaching", "/coaching", "coaching"),
         ("Accounts", "/settings/accounts", "accounts"),
         ("Import", "/settings/import", "settings"),

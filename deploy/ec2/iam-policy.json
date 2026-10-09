@@ -27,6 +27,13 @@
       "Resource": "arn:aws:s3:::TRADZLOG_UPLOADS_BUCKET"
     },
     {
+      "Sid": "TradzlogEmail",
+      "Effect": "Allow",
+      "Action": "ses:SendEmail",
+      "Resource": "arn:aws:ses:eu-west-2:*:identity/TRADZLOG_DOMAIN",
+      "Condition": { "StringLike": { "ses:FromAddress": "*@TRADZLOG_DOMAIN" } }
+    },
+    {
       "Sid": "TradzlogBackups",
       "Effect": "Allow",
       "Action": "s3:PutObject",

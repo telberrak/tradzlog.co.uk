@@ -194,3 +194,9 @@ def test_deposits_and_withdrawals_move_balance_but_not_drawdown() -> None:
     assert [(point.day.day, point.balance) for point in curve] == [(2, Decimal("1100")), (3, Decimal("2100")), (4, Decimal("1600")), (5, Decimal("1550"))]
     assert [point.drawdown_pct for point in curve[:3]] == [0, 0, 0]  # the withdrawal is not a drawdown
     assert curve[3].drawdown_pct == Decimal("-50") / Decimal("1600") * 100
+
+
+def test_uk_tax_years_run_from_6_april() -> None:
+    years = web_main.uk_tax_years(date(2026, 10, 9))
+    assert years[0] == ("2026/27", "2026-04-06..2027-04-05") and years[1] == ("2025/26", "2025-04-06..2026-04-05")
+    assert web_main.uk_tax_years(date(2026, 4, 5))[0] == ("2025/26", "2025-04-06..2026-04-05")

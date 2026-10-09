@@ -31,7 +31,7 @@ SESSION_LIFETIME = timedelta(days=30)
 REFRESH_AFTER = timedelta(hours=1)
 CSRF_FIELD = "csrf_token"
 # Forms posted before a session exists; protected by an origin check instead of a token.
-SESSIONLESS_POSTS = {"/login", "/signup"}
+SESSIONLESS_POSTS = {"/login", "/signup", "/forgot-password", "/reset-password"}
 
 
 class LoginRequired(Exception):

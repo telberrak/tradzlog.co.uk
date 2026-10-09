@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from secrets import token_urlsafe
 from html import escape
 from urllib.parse import quote
 
@@ -12,20 +13,23 @@ from sqlalchemy import delete, select
 
 from tradzlog_api.config import settings
 from tradzlog_api.security import hash_password, verify_password
+from tradzlog_api.services import email as mail
 from tradzlog_api.services.users import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
     EmailTaken,
     RegistrationClosed,
     authenticate,
+    normalise_email,
     register_user,
 )
-from tradzlog_db.models import WebSession
+from tradzlog_db.models import AuthToken, AuthTokenPurpose, User, WebSession
 from tradzlog_db.session import SessionLocal
 from tradzlog_web.auth import (
     CURRENT_USER_ID,
     current_user,
     end_session,
+    hash_token,
     safe_next,
     start_session,
 )
@@ -52,13 +56,14 @@ def password_problem(password: str, repeat: str) -> str:
 # --------------------------------------------------------------------- sign in
 
 
-def login_form(next_path: str, email: str = "", error: str = "") -> str:
+def login_form(next_path: str, email: str = "", error: str = "", message: str = "") -> str:
     signup_hint = (
-        '<p class="switch">New here? <a href="/signup">Create an account</a></p>'
+        '<p class="switch"><a href="/forgot-password">Forgot your password?</a><br />New here? <a href="/signup">Create an account</a></p>'
     )
+    notice = f'<p class="form-ok">{escape(message)}</p>' if message else ""
     return auth_page(
         "Sign in",
-        f"""{error_box(error)}
+        f"""{notice}{error_box(error)}
         <form method="post" action="/login">
           <input type="hidden" name="next" value="{escape(next_path)}" />
           <div class="field"><label for="email">Email</label>
@@ -72,10 +77,11 @@ def login_form(next_path: str, email: str = "", error: str = "") -> str:
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page(next: str | None = Query(default=None)) -> HTMLResponse:  # noqa: A002 - query name
+def login_page(next: str | None = Query(default=None), reset: str = Query(default="")) -> HTMLResponse:  # noqa: A002 - query name
     if CURRENT_USER_ID.get() is not None:
         return RedirectResponse(safe_next(next), status_code=status.HTTP_303_SEE_OTHER)
-    return HTMLResponse(login_form(safe_next(next)))
+    message = "Password changed. Sign in with your new password." if reset else ""
+    return HTMLResponse(login_form(safe_next(next), message=message))
 
 
 @router.post("/login")
@@ -167,7 +173,113 @@ def signup_submit(
         response = RedirectResponse("/dashboard", status_code=status.HTTP_303_SEE_OTHER)
         start_session(db, user, request, response)
         db.commit()
+        mail.send(mail.welcome(user.email, user.name))
         return response
+    finally:
+        db.close()
+
+
+# --------------------------------------------------------------------- forgotten password
+
+RESET_LIFETIME = timedelta(minutes=60)
+
+
+def forgot_form(email_value: str = "", sent: bool = False) -> str:
+    if sent:
+        body = """<p class="form-ok">If an account uses that address, we've emailed it a link to choose a new password.
+          The link works once, for 60 minutes. Check your spam folder if it doesn't arrive.</p>
+          <p class="switch"><a href="/login">Back to sign in</a></p>"""
+    else:
+        body = f"""<form method="post" action="/forgot-password">
+          <p class="muted" style="margin:0">Enter your account's email and we'll send you a link to choose a new password.</p>
+          <div class="field"><label for="email">Email</label>
+            <input id="email" name="email" type="email" autocomplete="email" maxlength="255" value="{escape(email_value)}" required autofocus /></div>
+          <button class="btn btn-primary" type="submit">Email me a link</button>
+        </form>
+        <p class="switch"><a href="/login">Back to sign in</a></p>"""
+    return auth_page("Reset your password", body)
+
+
+@router.get("/forgot-password", response_class=HTMLResponse)
+def forgot_page() -> str:
+    return forgot_form()
+
+
+@router.post("/forgot-password", response_class=HTMLResponse)
+def forgot_submit(email_address: str = Form("", alias="email")) -> str:
+    db = SessionLocal()
+    try:
+        user = db.scalar(select(User).where(User.email == normalise_email(email_address)))
+        if user is not None and user.hashed_password:
+            now = datetime.now(UTC)
+            # Only the newest link works.
+            db.execute(delete(AuthToken).where(AuthToken.user_id == user.id, AuthToken.purpose == AuthTokenPurpose.PASSWORD_RESET))
+            raw = token_urlsafe(32)
+            db.add(AuthToken(user_id=user.id, purpose=AuthTokenPurpose.PASSWORD_RESET, token_hash=hash_token(raw), expires_at=now + RESET_LIFETIME))
+            db.commit()
+            link = f"{settings.public_url}/reset-password?token={raw}"
+            mail.send(mail.password_reset(user.email, user.name, link, int(RESET_LIFETIME.total_seconds() // 60)))
+        # The same answer whether or not the account exists, so addresses can't be probed.
+        return forgot_form(sent=True)
+    finally:
+        db.close()
+
+
+def live_reset_token(db, raw: str) -> AuthToken | None:
+    if not raw or len(raw) > 128:
+        return None
+    token = db.scalar(select(AuthToken).where(AuthToken.token_hash == hash_token(raw), AuthToken.purpose == AuthTokenPurpose.PASSWORD_RESET))
+    if token is None or token.used_at is not None or token.expires_at <= datetime.now(UTC):
+        return None
+    return token
+
+
+def reset_form(raw: str, error: str = "") -> str:
+    return auth_page("Choose a new password", f"""{error_box(error)}
+        <form method="post" action="/reset-password">
+          <input type="hidden" name="token" value="{escape(raw)}" />
+          <div class="field"><label for="new">New password</label>
+            <input id="new" name="new" type="password" autocomplete="new-password" minlength="{MIN_PASSWORD_LENGTH}" maxlength="{MAX_PASSWORD_LENGTH}" required autofocus /></div>
+          <div class="field"><label for="new2">Repeat new password</label>
+            <input id="new2" name="new2" type="password" autocomplete="new-password" required /></div>
+          <p class="hint">Setting a new password signs you out on every device.</p>
+          <button class="btn btn-primary" type="submit">Set new password</button>
+        </form>""")
+
+
+def expired_link() -> str:
+    return auth_page("Link expired", """<p class="form-error">This reset link has expired or was already used.</p>
+        <p class="switch"><a href="/forgot-password">Send a new link</a></p>""")
+
+
+@router.get("/reset-password", response_class=HTMLResponse)
+def reset_page(token: str = Query(default="")) -> HTMLResponse:
+    db = SessionLocal()
+    try:
+        if live_reset_token(db, token) is None:
+            return HTMLResponse(expired_link(), status_code=400)
+        return HTMLResponse(reset_form(token))
+    finally:
+        db.close()
+
+
+@router.post("/reset-password", response_model=None)
+def reset_submit(token: str = Form(""), new: str = Form(""), new2: str = Form("")) -> HTMLResponse | RedirectResponse:
+    db = SessionLocal()
+    try:
+        found = live_reset_token(db, token)
+        if found is None:
+            return HTMLResponse(expired_link(), status_code=400)
+        problem = password_problem(new, new2)
+        if problem:
+            return HTMLResponse(reset_form(token, problem), status_code=400)
+        user = db.get(User, found.user_id)
+        user.hashed_password = hash_password(new)
+        found.used_at = datetime.now(UTC)
+        sign_out_other_sessions(db, user.id, None)  # every device, including any an attacker had
+        db.commit()
+        mail.send(mail.password_changed(user.email, user.name))
+        return RedirectResponse("/login?reset=1", status_code=status.HTTP_303_SEE_OTHER)
     finally:
         db.close()
 
@@ -262,6 +374,7 @@ def change_password(request: Request, current: str = Form(""), new: str = Form("
         user.hashed_password = hash_password(new)
         sign_out_other_sessions(db, user.id, request.state.session_token_hash)
         db.commit()
+        mail.send(mail.password_changed(user.email, user.name))
         return security_redirect(message="Password changed. Other devices have been signed out.")
     finally:
         db.close()
