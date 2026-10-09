@@ -178,12 +178,15 @@ re-importing creates no duplicates, and an import can be undone.
 
 ## M4. Public launch readiness
 
-**Status (8 October 2026): in progress.** Done and deployed: the landing site (1), onboarding guide
-(2, without sample data), draft legal pages and the not-advice notice on every coaching page (4),
-data export and account deletion (5, without the confirmation email until email exists), error
-pages, and the feature flags (8: `FEATURE_COMMUNITY`, `FEATURE_BILLING`, both off). Waiting on
-decisions: the email provider (3), the legal entity and a lawyer's read of the legal drafts (4),
-ICO registration (6). Still to build: the rest of the redesign (7).
+**Status (9 October 2026): built; waiting on owner tasks.** Done and deployed: landing site (1),
+onboarding guide (2, without sample data), transactional email through Amazon SES with a
+forgotten-password flow (3), draft legal pages and the not-advice notice on coaching (4), data
+export and account deletion with a confirmation email (5), the redesign of every remaining page
+(7), error pages, and the feature flags (8: `FEATURE_COMMUNITY`, `FEATURE_BILLING`, both off).
+Also added on request: deposits and withdrawals, custom From/To dates, the positions account
+filter, and real "Ask the coach" answers. Owner tasks left: SES domain verification and
+production access (see docs/DEPLOY_AWS.md, Email), the legal entity and a lawyer's read of the
+legal drafts (4), ICO registration (6).
 
 **Tasks**
 

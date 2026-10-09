@@ -133,6 +133,8 @@ Each deploy writes them to `/srv/tradzlog/.env`; never edit that file on the ser
 | `ANTHROPIC_API_KEY`        | no       | AI coaching                                                              |
 | `SENTRY_DSN`               | no       | error tracking                                                           |
 | `S3_PREFIX`                | no       | key prefix inside the bucket                                             |
+| `EMAIL_BACKEND`            | no       | `ses` once SES is set up (see Email below); `log` (default) sends nothing |
+| `EMAIL_FROM`               | no       | sender; default `TradzLog <no-reply@TRADZLOG_DOMAIN>`                    |
 
 \* Until the web app has its own sign-in. \*\* While `REGISTRATION_OPEN` is not `true`; without it nobody can sign up.
 
@@ -194,6 +196,42 @@ Sign-up is invite-only while `REGISTRATION_OPEN` is not `true`. Open `https://tr
 (past the beta gate, if it is on), enter your details and the `REGISTRATION_INVITE_CODE`, and you
 are signed in. Then add your trading accounts under **Accounts** and your symbols under
 **Accounts → Instruments** (`/settings/instruments`).
+
+## Email (Amazon SES)
+
+TradzLog sends welcome, password-reset, password-changed and account-deleted emails. Until
+`EMAIL_BACKEND` is `ses`, nothing is sent (the worker logs the subject instead), so set this up
+before opening sign-up: without it nobody can reset a forgotten password.
+
+1. **[Browser] Verify the domain.** AWS console, region **Europe (London) eu-west-2** →
+   Amazon SES → Configuration → Identities → **Create identity** → Domain → `tradzlog.com` →
+   leave *Easy DKIM* (RSA 2048) selected → **Create identity**. The page lists three **CNAME**
+   records.
+2. **[Browser] DNS.** At your DNS provider, add the three CNAME records exactly as shown (name
+   and value). Add one more record so receiving servers know what to do with forged mail:
+   - Type **TXT**, name `_dmarc`, value `v=DMARC1; p=none; rua=mailto:YOUR_ADDRESS` (an address
+     you read; `p=none` only reports, it rejects nothing).
+   Within an hour or so the identity shows **Verified** in SES.
+3. **[Browser] Test while still in the sandbox.** New SES accounts can only send to verified
+   addresses. Identities → Create identity → Email address → your own address → open the
+   confirmation link in that inbox.
+4. **[Browser] Permissions.** IAM → Roles → `mizan-server` → `tradzlog` → Edit → JSON → add the
+   `TradzlogEmail` statement from [`iam-policy.json`](../deploy/ec2/iam-policy.json), replacing
+   `TRADZLOG_DOMAIN` with `tradzlog.com` (twice) → Save. It only allows sending from
+   `@tradzlog.com` addresses.
+5. **[Browser] Switch it on.** Systems Manager → Parameter Store → Create parameter →
+   name `/tradzlog/EMAIL_BACKEND`, type SecureString, value `ses`.
+6. **[Server] Apply** (or push any commit): as `deploy` in `/srv/tradzlog`,
+   `bash config.sh && docker compose up -d`.
+7. **[Browser] Check.** On the sign-in page use *Forgot your password?* with the address from
+   step 3; the email should arrive within a minute. If not:
+   `docker compose logs --tail 50 worker` on the server shows the SES error.
+8. **[Browser] Leave the sandbox.** SES → Account dashboard → **Request production access** →
+   Mail type *Transactional*, website `https://tradzlog.com`, and describe the use: account
+   emails only (welcome, password reset, security notices), sent to people who signed up, no
+   marketing. AWS usually answers within a day. Until then only verified addresses get mail.
+
+Replies to these emails go to `SUPPORT_EMAIL`.
 
 ## Removing the beta gate
 
