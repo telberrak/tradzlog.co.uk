@@ -1002,3 +1002,106 @@ def test_reset_links_expire_and_only_the_newest_works(client) -> None:
     finally:
         db.close()
     assert client.get(f"/reset-password?token={second}").status_code == 400
+
+
+# --------------------------------------------------------------------- AI coaching
+
+
+def test_ask_the_coach_sends_only_your_data_to_claude(client, monkeypatch) -> None:
+    import json
+
+    import tradzlog_web.main as web_main
+    from tradzlog_db.models import Trade, TradeMetrics, TradeStatus
+
+    email = sign_up(client, "Coachee")
+    marker = f"coach{uuid4().hex[:6]}"
+    ids = seed_private_book(email, marker)
+    with new_client() as other:
+        seed_private_book(sign_up(other, "Bystander"), f"other{uuid4().hex[:6]}")
+    db = SessionLocal()
+    try:
+        trade = db.get(Trade, ids["trade_id"])
+        trade.status = TradeStatus.CLOSED
+        trade.closed_at = datetime.now(UTC)
+        db.get(TradeMetrics, trade.id).realized_pnl = Decimal("-42.5")
+        db.commit()
+    finally:
+        db.close()
+
+    asked: list[tuple[str, str]] = []
+
+    def fake_answer(name: str, question: str, data: str) -> str:
+        asked.append((question, data))
+        return "You lose most on ORB."
+
+    monkeypatch.setattr(web_main, "answer_question", fake_answer)
+    page = client.get("/coaching/chat?q=Why%20do%20I%20lose%3F")
+    assert "Why do I lose?" in page.text and "Which setup should I trade less" in page.text
+    token = csrf_from(page.text)
+    answered = client.post("/coaching/chat", data={"csrf_token": token, "question": "Why do I lose?"})
+    assert "You lose most on ORB." in answered.text and "not financial advice" in answered.text
+    data = json.loads(asked[0][1])
+    assert data["overall"]["closed_trades"] == 1 and Decimal(data["overall"]["net_pnl"]) == Decimal("-42.5")
+    assert data["by_setup"][0]["group"] == f"{marker}-setup"
+    assert "other" not in asked[0][1]
+
+
+def test_coaching_without_an_api_key_says_so(client, monkeypatch) -> None:
+    from tradzlog_api.config import settings
+    from tradzlog_db.models import Trade, TradeStatus
+
+    monkeypatch.setattr(settings, "anthropic_api_key", None)
+    email = sign_up(client, "NoKey")
+    ids = seed_private_book(email, f"nokey{uuid4().hex[:6]}")
+    db = SessionLocal()
+    try:
+        trade = db.get(Trade, ids["trade_id"])
+        trade.status = TradeStatus.CLOSED
+        trade.closed_at = datetime.now(UTC)
+        db.commit()
+    finally:
+        db.close()
+    token = csrf_from(client.get("/coaching").text)
+    answer = client.post("/coaching/chat", data={"csrf_token": token, "question": "How am I doing?"}).text
+    assert "switched on for this site yet" in answer
+    client.post("/coaching/generate", data={"csrf_token": token})
+    dashboard = client.get("/coaching").text
+    assert "switched on for this site yet" in dashboard
+    assert "Payload prepared" not in dashboard
+
+
+def test_screenshots_upload_gallery_and_delete(client) -> None:
+    from tradzlog_api.services import storage
+    from tradzlog_db.models import Attachment
+
+    email = sign_up(client, "Charter")
+    ids = seed_private_book(email, f"shot{uuid4().hex[:6]}")
+    page = client.get(f"/settings/uploads?trade_id={ids['trade_id']}").text
+    assert f'<option value="{ids["trade_id"]}" selected>' in page
+    token = csrf_from(page)
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    uploaded = client.post("/settings/uploads", data={"csrf_token": token, "trade_id": ids["trade_id"], "journal_entry_id": ""},
+                           files={"file": ("chart.png", png, "image/png")}, follow_redirects=False)
+    assert uploaded.status_code == 303
+    db = SessionLocal()
+    try:
+        row = db.scalar(select(Attachment).where(Attachment.trade_id == ids["trade_id"], Attachment.file_name == "chart.png"))
+        stored = storage.LOCAL_ROOT / row.url.removeprefix("local:")
+    finally:
+        db.close()
+    assert stored.read_bytes() == png
+    gallery = client.get("/settings/uploads").text
+    assert f'/settings/uploads/{row.id}/delete' in gallery and f'href="/trades/{ids["trade_id"]}"' in gallery
+
+    with new_client() as other:
+        sign_up(other, "Intruder")
+        other_token = csrf_from(other.get("/dashboard").text)
+        assert other.post(f"/settings/uploads/{row.id}/delete", data={"csrf_token": other_token}).status_code == 404
+    assert stored.exists()
+    client.post(f"/settings/uploads/{row.id}/delete", data={"csrf_token": token})
+    assert not stored.exists()
+    db = SessionLocal()
+    try:
+        assert db.get(Attachment, row.id) is None
+    finally:
+        db.close()

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -13,15 +14,14 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import selectinload
 
 from tradzlog_api.config import settings
 from tradzlog_api.services import storage
-from tradzlog_api.services.ai import build_coaching_payload, generate_coaching_insight
+from tradzlog_api.services.ai import answer_question, generate_coaching_insight
 from tradzlog_api.services.analytics import (
-    grouped_performance,
     rebuild_daily_stats,
     rebuild_equity_curve,
     summary,
@@ -196,7 +196,7 @@ WEB_SENSITIVE_POSTS = {
     "/community/mentor/comments",
 }
 
-WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/", "/settings/import/", "/transactions")
+WEB_SENSITIVE_POST_PREFIXES = ("/positions/", "/trades/", "/settings/import/", "/settings/uploads/", "/transactions")
 
 ALLOWED_UPLOAD_TYPES = set(storage.IMAGE_EXTENSIONS)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
@@ -907,7 +907,7 @@ def trade_detail(trade_id: str) -> str:
               {f'<div style="margin-top:12px">{flags}</div>' if flags else ""}
             </div>
             <div class="card">
-              <div class="card-title"><h2>Journal and screenshots</h2><a class="btn btn-sm" href="/settings/uploads">Upload</a></div>
+              <div class="card-title"><h2>Journal and screenshots</h2><a class="btn btn-sm" href="/settings/uploads?trade_id={tid}">Upload</a></div>
               {f'<ul style="margin:0 0 12px;padding-left:18px">{journal_items}</ul>' if journal_items else f'<p class="muted">No review yet. <a href="/trades/{tid}/journal">Write one</a> while it is fresh.</p>'}
               {f'<div class="thumbs">{thumbs}</div>' if thumbs else ""}
             </div>
@@ -1503,64 +1503,78 @@ def validate_upload(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail="Unsupported upload type")
 
 
+def owned_attachment_filter(user_id: str):
+    return or_(
+        Attachment.trade_id.in_(select(Trade.id).where(Trade.user_id == user_id)),
+        Attachment.journal_entry_id.in_(select(JournalEntry.id).where(JournalEntry.user_id == user_id)),
+    )
+
+
 @app.get("/settings/uploads", response_class=HTMLResponse)
-def uploads_page() -> str:
+def uploads_page(trade_id: str | None = Query(default=None), journal_entry_id: str | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Uploads", "settings", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
         trades = session.scalars(
-            select(Trade).options(selectinload(Trade.instrument)).where(Trade.user_id == user.id).order_by(Trade.opened_at.desc()).limit(100)
+            select(Trade).options(selectinload(Trade.instrument)).where(Trade.user_id == user.id).order_by(Trade.opened_at.desc()).limit(200)
         ).all()
         journals = session.scalars(
-            select(JournalEntry).where(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(100)
+            select(JournalEntry).where(JournalEntry.user_id == user.id).order_by(JournalEntry.date.desc()).limit(200)
         ).all()
-        trade_ids = [trade.id for trade in trades]
-        journal_ids = [journal.id for journal in journals]
-        if trade_ids and journal_ids:
-            attachment_filter = Attachment.trade_id.in_(trade_ids) | Attachment.journal_entry_id.in_(journal_ids)
-        elif trade_ids:
-            attachment_filter = Attachment.trade_id.in_(trade_ids)
-        elif journal_ids:
-            attachment_filter = Attachment.journal_entry_id.in_(journal_ids)
-        else:
-            attachment_filter = Attachment.id == ""
         attachments = session.scalars(
-            select(Attachment).where(attachment_filter).order_by(Attachment.created_at.desc()).limit(100)
+            select(Attachment).where(owned_attachment_filter(user.id)).order_by(Attachment.created_at.desc()).limit(120)
         ).all()
-        trade_options = '<option value="">No linked trade</option>' + "".join(
-            f'<option value="{escape(trade.id)}">{escape(trade.instrument.symbol)} · {escape(localtime.fmt(trade.opened_at, "%Y-%m-%d"))}</option>'
-            for trade in trades
+        trade_names = {trade.id: f"{trade.instrument.symbol} · {localtime.fmt(trade.opened_at, '%d %b %Y')}" for trade in trades}
+        journal_names = {journal.id: journal.title for journal in journals}
+        trade_options = '<option value="">No trade</option>' + "".join(
+            f'<option value="{escape(key)}" {"selected" if key == trade_id else ""}>{escape(label)}</option>' for key, label in trade_names.items()
         )
-        journal_options = '<option value="">No linked journal</option>' + "".join(
-            f'<option value="{escape(journal.id)}">{escape(journal.title)}</option>' for journal in journals
+        journal_options = '<option value="">No journal entry</option>' + "".join(
+            f'<option value="{escape(key)}" {"selected" if key == journal_entry_id else ""}>{escape(label)}</option>' for key, label in journal_names.items()
         )
-        attachment_rows = "".join(
-            f"""<tr><td><a class="pill" href="{escape(storage.display_url(row.url))}" target="_blank" rel="noopener">{escape(row.file_name)}</a></td><td>{row.file_size:,}</td><td>{escape(row.mime_type)}</td><td>{escape(localtime.fmt(row.created_at))}</td></tr>"""
-            for row in attachments
-        ) or '<tr><td colspan="4" class="muted">No uploads yet.</td></tr>'
+        tiles = ""
+        for row in attachments:
+            url = escape(storage.display_url(row.url))
+            links = []
+            if row.trade_id:
+                links.append(f'<a href="/trades/{escape(row.trade_id)}">{escape(trade_names.get(row.trade_id, "Trade"))}</a>')
+            if row.journal_entry_id:
+                links.append(f'<a href="/journal/{escape(row.journal_entry_id)}">{escape(journal_names.get(row.journal_entry_id, "Journal entry"))}</a>')
+            tiles += f"""<figure class="shot">
+              <a href="{url}" target="_blank" rel="noopener"><img src="{url}" alt="{escape(row.file_name)}" loading="lazy" /></a>
+              <figcaption><div>{" · ".join(links) or escape(row.file_name)}</div>
+                <span class="meta">{escape(localtime.fmt(row.created_at, "%d %b %Y"))} · {row.file_size / 1024 / 1024:.1f} MB</span>
+                <form method="post" action="/settings/uploads/{escape(row.id)}/delete" style="margin:0"><button class="btn btn-sm btn-ghost" type="submit">Delete</button></form>
+              </figcaption></figure>"""
+        gallery = (f'<section class="shots">{tiles}</section>' if tiles
+                   else empty_state("No screenshots yet", "Upload chart screenshots and attach them to trades or journal entries."))
         body = f"""
-          <section class="grid two-col">
-            <form class="card" style="margin-top:16px" method="post" action="/settings/uploads" enctype="multipart/form-data">
-              <div class="section-head"><div><div class="label">Screenshots</div><h2 style="margin:4px 0 0">Upload Chart Image</h2></div><button class="primary" type="submit">Upload</button></div>
-              <div class="field"><label>Trade</label><select name="trade_id">{trade_options}</select></div>
-              <div class="field" style="margin-top:12px"><label>Journal</label><select name="journal_entry_id">{journal_options}</select></div>
-              <div class="field" style="margin-top:12px"><label>Image</label><input type="file" name="file" accept="image/png,image/jpeg,image/webp" required /></div>
-              <p class="muted small">PNG, JPEG or WebP, up to 10 MB. Screenshots are private to your account.</p>
-            </form>
-            <section class="card" style="margin-top:16px">
-              <div class="section-head"><div><div class="label">Storage</div><h2 style="margin:4px 0 0">Attachment Rules</h2></div></div>
-              <p class="muted">Attach screenshots to either a trade, a journal entry, or both. Annotation JSON is reserved on the model for later chart markup.</p>
-              <div class="actions"><a class="pill" href="/journal">Journal</a><a class="pill" href="/trades">Trades</a></div>
-            </section>
-          </section>
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Uploads</div><h2 style="margin:4px 0 0">Recent Attachments</h2></div></div>
-            <table><thead><tr><th>File</th><th>Size</th><th>Type</th><th>Uploaded</th></tr></thead><tbody>{attachment_rows}</tbody></table>
-          </section>
+          <form class="card upload-bar" method="post" action="/settings/uploads" enctype="multipart/form-data">
+            <div class="field"><label for="u-file">Screenshot</label><input id="u-file" type="file" name="file" accept="image/png,image/jpeg,image/webp" required /></div>
+            <div class="field"><label for="u-trade">Trade</label><select id="u-trade" name="trade_id">{trade_options}</select></div>
+            <div class="field"><label for="u-journal">Journal entry</label><select id="u-journal" name="journal_entry_id">{journal_options}</select></div>
+            <button class="btn btn-primary" type="submit">Upload</button>
+            <p class="hint" style="grid-column:1/-1;margin:0">PNG, JPEG or WebP up to 10 MB, attached to a trade, a journal entry or both. Only you can see them.</p>
+          </form>
+          {gallery}
         """
-        return shell("Uploads", "settings", body, "Settings", user.name or user.email)
+        return shell("Screenshots", "settings", body, "Settings", user.name or user.email)
+    finally:
+        session.close()
+
+
+@app.post("/settings/uploads/{attachment_id}/delete")
+def delete_upload(attachment_id: str) -> RedirectResponse:
+    session = SessionLocal()
+    try:
+        user = current_user(session)
+        attachment = session.scalar(select(Attachment).where(Attachment.id == attachment_id, owned_attachment_filter(user.id)))
+        if attachment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND)
+        storage.get_storage().delete(attachment.url)
+        session.delete(attachment)
+        session.commit()
+        return RedirectResponse("/settings/uploads", status_code=status.HTTP_303_SEE_OTHER)
     finally:
         session.close()
 
@@ -1797,37 +1811,91 @@ def insight_cards(insights: list[AIInsight]) -> str:
     return insight_cards_html(insights)
 
 
+def group_summary(groups: list[book.Group]) -> list[dict[str, object]]:
+    return [
+        {"group": group.key, "trades": group.stats.trades, "net_pnl": str(group.stats.net_pnl),
+         "win_rate_pct": str(round(group.stats.win_rate, 1)),
+         "expectancy_r": str(round(group.stats.expectancy_r, 2)) if group.stats.expectancy_r is not None else None}
+        for group in groups
+    ]
+
+
+def coaching_context(session, user: User) -> tuple[list[Trade], book.Stats, str]:
+    """Closed trades, their stats, and the JSON Claude sees: totals, groupings and the 30 latest trades."""
+    _, _, trades = load_book(session, user, None)
+    closed = sorted((trade for trade in trades if trade.status == TradeStatus.CLOSED), key=lambda trade: trade.closed_at, reverse=True)
+    result = book.stats(closed)
+    data = {
+        "timezone": user.timezone,
+        "overall": {"closed_trades": result.trades, "net_pnl": str(result.net_pnl), "win_rate_pct": str(round(result.win_rate, 1)),
+                    "profit_factor": str(round(result.profit_factor, 2)) if result.profit_factor is not None else None,
+                    "expectancy_r": str(round(result.expectancy_r, 2)) if result.expectancy_r is not None else None,
+                    "average_hold_hours": str(round(result.average_hold_hours, 1)) if result.average_hold_hours is not None else None,
+                    "best_trade": str(result.best_trade), "worst_trade": str(result.worst_trade)},
+        "by_setup": group_summary(book.by_expectancy(book.group_by(closed, by_setup))),
+        "by_instrument": group_summary(book.by_expectancy(book.group_by(closed, by_symbol))),
+        "by_weekday": group_summary(book.group_by(closed, lambda trade: WEEKDAYS[localtime.local(trade.opened_at).weekday()])),
+        "by_entry_hour": group_summary(book.group_by(closed, lambda trade: f"{localtime.local(trade.opened_at).hour:02d}:00")),
+        "recent_trades": [
+            {"closed": localtime.fmt(trade.closed_at), "symbol": trade.instrument.symbol, "side": trade.direction.value,
+             "setup": trade.setup_tag, "net_pnl": str(book.pnl(trade)),
+             "r_multiple": str(book.r_multiple(trade)) if book.r_multiple(trade) is not None else None,
+             "mistakes": trade.mistake_flags or []}
+            for trade in closed[:30]
+        ],
+    }
+    return closed, result, json.dumps(data)
+
+
+SUGGESTED_QUESTIONS = (
+    "Which setup should I trade less, and why?",
+    "What time of day am I losing the most?",
+    "Am I cutting winners short compared with my losers?",
+    "What do my last 10 losing trades have in common?",
+)
+
+
 @app.get("/coaching", response_class=HTMLResponse)
 def coaching_dashboard() -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("AI Coaching", "coaching", '<section class="empty" style="margin-top:18px">No users found. Run seed data first.</section>')
-        metrics = summary(session, user.id)
-        setups = grouped_performance(session, user.id, "setup")
+        closed, result, _ = coaching_context(session, user)
         insights = latest_insights(session, user.id)
+        setups = book.by_expectancy(book.group_by(closed, by_setup))
         setup_rows = "".join(
-            f"""<tr><td>{escape(str(row["key"]))}</td><td class="num">{row["trades"]}</td><td class="num {tone(row["netPnl"])}">{money(row["netPnl"])}</td><td class="num">{number(row["winRate"], "%")}</td><td class="num">{number(row["averageR"], "R")}</td><td>{coach_quality_badge(row["averageR"], row["trades"])}</td></tr>"""
-            for row in setups[:10]
-        ) or '<tr><td colspan="6" class="muted">No setup scorecard data yet.</td></tr>'
+            f"""<tr><td>{escape(group.key)}</td><td class="num">{group.stats.trades}</td>
+              <td class="num {tone(group.stats.net_pnl)}">{money(group.stats.net_pnl, signed=True)}</td>
+              <td class="num">{number(group.stats.win_rate, "%")}</td>
+              <td class="num {tone(group.stats.expectancy_r)}">{number(group.stats.expectancy_r, "R") if group.stats.expectancy_r is not None else "—"}</td>
+              <td>{coach_quality_badge(group.stats.expectancy_r or 0, group.stats.trades)}</td></tr>"""
+            for group in setups[:12]
+        )
+        scorecard = (
+            f"""<div class="table-wrap"><table class="dense"><thead><tr><th>Setup</th><th class="num">Trades</th><th class="num">Net P&amp;L</th>
+              <th class="num">Win rate</th><th class="num">Expectancy</th><th>Verdict</th></tr></thead><tbody>{setup_rows}</tbody></table></div>"""
+            if setup_rows else '<p class="muted">Tag your trades with a setup to see which ones carry your results.</p>'
+        )
+        review = (
+            insight_cards_html(insights) if insights
+            else '<p class="muted">No reviews yet. A review reads your closed trades and points out what is working and what is not.</p>'
+        )
+        can_review = result.trades > 0
         body = f"""
           {coaching_nav("dashboard")}
-          <section class="grid kpis">
-            {kpi_card("Net P&L", money(metrics["net_pnl"]), tone(metrics["net_pnl"]), "Coach context")}
-            {kpi_card("Win Rate", number(metrics["win_rate"], "%"), "neutral", "Closed trades")}
-            {kpi_card("Profit Factor", number(metrics["profit_factor"]), "neutral", "Book quality")}
-            {kpi_card("Average R", number(metrics["average_r"], "R"), tone(metrics["average_r"]), "Expectancy")}
+          <section class="kpi-row">
+            {kpi("Closed trades", str(result.trades))}
+            {kpi("Net P&L", money(result.net_pnl, signed=True), tone(result.net_pnl))}
+            {kpi("Win rate", number(result.win_rate, "%"))}
+            {kpi("Expectancy", number(result.expectancy_r, "R") if result.expectancy_r is not None else "—", tone(result.expectancy_r))}
           </section>
-          <section class="grid two-col">
-            <section class="card" style="margin-top:16px">
-              <div class="section-head"><div><div class="label">Pattern Analysis</div><h2 style="margin:4px 0 0">AI Insights</h2></div><form method="post" action="/coaching/generate"><button class="primary" type="submit">Generate</button></form></div>
-              <div class="grid">{insight_cards_html(insights)}</div>
+          <section class="grid two-col" style="grid-template-columns:repeat(auto-fit,minmax(360px,1fr));align-items:start">
+            <section class="card">
+              <div class="card-title"><h2>AI review</h2>
+                <form method="post" action="/coaching/generate"><button class="btn btn-sm btn-primary" type="submit" {"" if can_review else "disabled"}>New review</button></form></div>
+              {review}
             </section>
-            <section class="card" style="margin-top:16px">
-              <div class="section-head"><div><div class="label">Setup Scorecard</div><h2 style="margin:4px 0 0">Edge Quality</h2></div></div>
-              <table><thead><tr><th>Setup</th><th>Trades</th><th>Net</th><th>Win</th><th>Avg R</th><th>Coach Note</th></tr></thead><tbody>{setup_rows}</tbody></table>
-            </section>
+            <section class="card"><div class="card-title"><h2>Setup scorecard</h2><span class="meta">All accounts, all time</span></div>{scorecard}</section>
           </section>
         """
         return shell("AI Coaching", "coaching", body, "Coaching", user.name or user.email)
@@ -1840,74 +1908,60 @@ def generate_coaching() -> RedirectResponse:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            raise HTTPException(status_code=400, detail="No demo user available")
-        payload = build_coaching_payload(dict(summary(session, user.id)), grouped_performance(session, user.id, "setup"))
-        insight = generate_coaching_insight(user.id, user.name or user.email, None, payload)
-        session.add(insight)
-        session.commit()
+        _, result, data = coaching_context(session, user)
+        if result.trades:
+            payload = json.dumps({"prompt": "Analyse the following trading data and identify behavioural and statistical patterns.",
+                                  "tradingData": json.loads(data)})
+            session.add(generate_coaching_insight(user.id, user.name or "the trader", None, payload))
+            session.commit()
         return RedirectResponse("/coaching", status_code=status.HTTP_303_SEE_OTHER)
     finally:
         session.close()
 
 
-def coach_answer(question: str, metrics: dict[str, object], setups: list[dict[str, object]], recent_trades: list[Trade]) -> str:
-    best_setup = setups[0]["key"] if setups else "no setup yet"
-    worst_setup = setups[-1]["key"] if setups else "no setup yet"
-    recent_loss_count = len([trade for trade in recent_trades if trade.metrics and trade.metrics.realized_pnl < 0])
-    return (
-        f"Question: {question}\n\n"
-        f"Your current data shows {metrics['trades_count']} closed trades, {money(metrics['net_pnl'])} net P&L, "
-        f"{number(metrics['win_rate'], '%')} win rate, {number(metrics['profit_factor'])} profit factor, "
-        f"and {number(metrics['average_r'], 'R')} average R.\n\n"
-        f"Strongest current setup by net contribution: {best_setup}. Weakest or lowest-ranked setup: {worst_setup}. "
-        f"In the latest 30 trades, {recent_loss_count} were losses. The immediate coaching focus is to compare the losing trades against setup quality, "
-        "planned R, and whether the trade had a clear journal thesis before entry."
+def chat_form(question: str = "") -> str:
+    chips = "".join(
+        f'<a class="btn btn-sm" href="/coaching/chat?q={quote(item)}">{escape(item)}</a>' for item in SUGGESTED_QUESTIONS
     )
+    return f"""<form class="card" method="post" action="/coaching/chat" style="display:grid;gap:12px">
+        <div class="card-title"><h2>Ask about your trading</h2><span class="meta">Answers use only your own trade history</span></div>
+        <div class="field"><label for="q">Your question</label>
+          <textarea id="q" name="question" rows="3" maxlength="1000" required placeholder="e.g. Why do my Tuesday trades lose money?">{escape(question)}</textarea></div>
+        <div class="actions"><button class="btn btn-primary" type="submit">Ask</button></div>
+        <div class="step-links">{chips}</div>
+      </form>"""
 
 
 @app.get("/coaching/chat", response_class=HTMLResponse)
-def coaching_chat() -> str:
+def coaching_chat(q: str = Query(default="")) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Ask the Coach", "coaching", '<section class="empty" style="margin-top:18px">No users found.</section>')
-        body = f"""
-          {coaching_nav("chat")}
-          <form class="card" style="margin-top:16px" method="post" action="/coaching/chat">
-            <div class="section-head"><div><div class="label">Ask the Coach</div><h2 style="margin:4px 0 0">Data-grounded Q&A</h2></div><button class="primary" type="submit">Ask</button></div>
-            <div class="field"><label>Question</label><textarea name="question" required placeholder="Why am I losing more on Tuesdays? Should I stop trading ES? What's killing my profit factor?"></textarea></div>
-          </form>
-        """
-        return shell("Ask the Coach", "coaching", body, "Coaching", user.name or user.email)
+        return shell("AI Coaching", "coaching", coaching_nav("chat") + chat_form(q[:1000]), "Coaching", user.name or user.email)
     finally:
         session.close()
 
 
 @app.post("/coaching/chat", response_class=HTMLResponse)
-def coaching_chat_answer(question: str = Form(...)) -> str:
+def coaching_chat_answer(question: str = Form("")) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            raise HTTPException(status_code=400, detail="No demo user available")
-        recent_trades = session.scalars(
-            select(Trade)
-            .options(selectinload(Trade.metrics))
-            .where(Trade.user_id == user.id, Trade.status == TradeStatus.CLOSED)
-            .order_by(Trade.closed_at.desc())
-            .limit(30)
-        ).all()
-        answer = coach_answer(question, summary(session, user.id), grouped_performance(session, user.id, "setup"), list(recent_trades))
+        question = question.strip()[:1000]
+        if not question:
+            return shell("AI Coaching", "coaching", coaching_nav("chat") + chat_form(), "Coaching", user.name or user.email)
+        _, result, data = coaching_context(session, user)
+        answer = (answer_question(user.name or "the trader", question, data) if result.trades
+                  else "There are no closed trades to look at yet. Import or log some trades, then ask again.")
         body = f"""
           {coaching_nav("chat")}
-          <section class="card" style="margin-top:16px">
-            <div class="section-head"><div><div class="label">Coach Response</div><h2 style="margin:4px 0 0">Answer</h2></div><a class="pill" href="/coaching/chat">Ask Another</a></div>
-            <p style="white-space:pre-wrap;line-height:1.65">{escape(answer)}</p>
+          <section class="card" style="margin-bottom:14px">
+            <div class="card-title"><h2>{escape(question)}</h2></div>
+            <div class="journal-text">{escape(answer)}</div>
           </section>
+          {chat_form()}
         """
-        return shell("Ask the Coach", "coaching", body, "Coaching", user.name or user.email)
+        return shell("AI Coaching", "coaching", body, "Coaching", user.name or user.email)
     finally:
         session.close()
 
@@ -1917,34 +1971,39 @@ def coaching_prompts(prompt_date: date | None = Query(default=None)) -> str:
     session = SessionLocal()
     try:
         user = current_user(session)
-        if user is None:
-            return shell("Journal Prompts", "coaching", '<section class="empty" style="margin-top:18px">No users found.</section>')
-        target_date = prompt_date or date.today()
-        trades = session.scalars(
-            select(Trade)
-            .options(selectinload(Trade.metrics), selectinload(Trade.instrument))
-            .where(Trade.user_id == user.id)
-            .where(Trade.opened_at >= datetime.combine(target_date, datetime.min.time()).replace(tzinfo=UTC))
-            .where(Trade.opened_at <= datetime.combine(target_date, datetime.max.time()).replace(tzinfo=UTC))
-        ).all()
-        loss_count = len([trade for trade in trades if trade.metrics and trade.metrics.realized_pnl < 0])
-        win_count = len([trade for trade in trades if trade.metrics and trade.metrics.realized_pnl > 0])
-        prompts = [
-            f"You logged {len(trades)} trades on {target_date.isoformat()} with {win_count} wins and {loss_count} losses. What changed between your best and worst execution?",
-            "Which trade most closely followed the plan you wrote before entry, and which one drifted from it?",
-            "If you could enforce one rule tomorrow based on today's behavior, what would it be?",
-        ]
-        prompt_cards = "".join(f'<article class="card"><div class="label">Reflection Prompt</div><p>{escape(prompt)}</p></article>' for prompt in prompts)
+        target_date = prompt_date or localtime.today()
+        _, _, trades = load_book(session, user, None)
+        day_trades = [trade for trade in trades if book.opened_day(trade) == target_date]
+        closed = [trade for trade in day_trades if trade.status == TradeStatus.CLOSED]
+        wins = sum(1 for trade in closed if book.pnl(trade) > 0)
+        losses = sum(1 for trade in closed if book.pnl(trade) < 0)
+        net = sum((book.pnl(trade) for trade in closed), Decimal("0"))
+        if day_trades:
+            prompts = [
+                f"You opened {len(day_trades)} trades on {target_date:%A %d %B}: {wins} won and {losses} lost, {money(net, signed=True)} net. "
+                "What separated your best execution from your worst?",
+                "Which trade followed the plan you had before entry most closely, and which one drifted from it?",
+                "Was there a moment you traded to win back a loss, or out of boredom? What triggered it?",
+                "If you could enforce one rule tomorrow based on today, what would it be?",
+            ]
+        else:
+            prompts = [
+                f"No trades on {target_date:%A %d %B}. Was staying out a decision or a missed opportunity?",
+                "What did you watch, and what would have made you take a trade?",
+                "What do you want to do the same, or differently, next session?",
+            ]
+        cards = "".join(f'<article class="card"><p style="margin:0;line-height:1.6">{escape(prompt)}</p></article>' for prompt in prompts)
         body = f"""
           {coaching_nav("prompts")}
-          <form class="actions" style="margin-top:16px" method="get" action="/coaching/prompts">
-            <input type="date" name="prompt_date" value="{target_date.isoformat()}" style="max-width:180px" />
-            <button type="submit">Load Prompts</button>
-            <a class="pill primary" href="/journal/new?entry_type=DAILY">Open Daily Journal</a>
-          </form>
-          <section class="grid accounts">{prompt_cards}</section>
+          <div class="filter-bar">
+            <form class="date-range" method="get" action="/coaching/prompts"><label>Day <input type="date" name="prompt_date" value="{target_date.isoformat()}" /></label>
+              <button class="btn btn-sm" type="submit">Show</button></form>
+            <a class="btn btn-primary" href="/journal/new?entry_type=DAILY&amp;entry_date={target_date.isoformat()}">Write this day's journal</a>
+          </div>
+          <section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px">{cards}</section>
+          {trade_table(day_trades, today_utc(), empty="") if day_trades else ""}
         """
-        return shell("Journal Prompts", "coaching", body, "Coaching", user.name or user.email)
+        return shell("AI Coaching", "coaching", body, "Coaching", user.name or user.email)
     finally:
         session.close()
 

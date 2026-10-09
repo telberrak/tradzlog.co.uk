@@ -368,6 +368,14 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .journal-detail-main{grid-column:span 2}
 @media (max-width:720px){.journal-detail-main{grid-column:auto}}
 @media print{.sidebar,.topbar,.no-print,.coach-disclaimer{display:none!important}.main-area{margin:0!important}.card{break-inside:avoid;box-shadow:none}}
+/* screenshots */
+.upload-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:end;margin-bottom:14px}
+.shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
+.shot{margin:0;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:var(--radius-lg);overflow:hidden}
+.shot img{display:block;width:100%;aspect-ratio:16/10;object-fit:cover;background:var(--bg-surface-alt)}
+.shot figcaption{display:grid;grid-template-columns:1fr auto;gap:2px 8px;padding:10px 12px;font-size:13px;align-items:center}
+.shot figcaption a{color:var(--text-primary);text-decoration:none}
+.shot figcaption form{grid-row:1/3;grid-column:2}
 /* first-run guide on the dashboard */
 .onboarding{margin-bottom:14px}
 .onboarding-progress{height:6px;border-radius:999px;background:var(--bg-surface-alt);overflow:hidden;margin:0 0 16px}
