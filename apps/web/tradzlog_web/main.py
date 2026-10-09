@@ -503,7 +503,7 @@ def portfolio() -> str:
             {kpi("Win rate", number(total.win_rate, "%"))}
             {kpi("Profit factor", number(total.profit_factor) if total.profit_factor is not None else "—")}
           </section>
-          <section class="grid" style="grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:14px">{cards}</section>"""
+          <section class="account-stack">{cards}</section>"""
         return shell("Portfolio", "portfolio", body, "All accounts", user.name or user.email)
     finally:
         session.close()

@@ -368,6 +368,8 @@ table.dense td.wrap{white-space:normal;max-width:220px;overflow:hidden;text-over
 .journal-detail-main{grid-column:span 2}
 @media (max-width:720px){.journal-detail-main{grid-column:auto}}
 @media print{.sidebar,.topbar,.no-print,.coach-disclaimer{display:none!important}.main-area{margin:0!important}.card{break-inside:avoid;box-shadow:none}}
+/* portfolio: one full-width card per account, stacked */
+.account-stack{display:grid;grid-template-columns:minmax(0,1fr);gap:14px}
 /* screenshots */
 .upload-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;align-items:end;margin-bottom:14px}
 .shots{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px}
